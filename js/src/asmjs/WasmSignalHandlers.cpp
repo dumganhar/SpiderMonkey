@@ -1239,6 +1239,9 @@ wasm::EnsureSignalHandlersInstalled(JSRuntime* rt)
     sTried = true;
 
 #if defined(ANDROID)
+    #ifdef JS_CODEGEN_NONE
+        return false;
+    #endif
     // Before Android 4.4 (SDK version 19), there is a bug
     //   https://android-review.googlesource.com/#/c/52333
     // in Bionic's pthread_join which causes pthread_join to return early when

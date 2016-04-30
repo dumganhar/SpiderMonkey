@@ -249,6 +249,8 @@ class MacroAssemblerNone : public Assembler
     template <typename T, typename S> void branchAdd32(Condition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void branchSub32(Condition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void branchPtr(Condition, T, S, Label*) { MOZ_CRASH(); }
+    template <typename T, typename S> void branch64(Condition cond, T, S, Label* label) { MOZ_CRASH(); }
+    template <typename T, typename S> void branch64(Condition cond, T, S, Register scratch, Label* label) { MOZ_CRASH(); }
     template <typename T, typename S> void branchTestPtr(Condition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void branchDouble(DoubleCondition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void branchFloat(DoubleCondition, T, S, Label*) { MOZ_CRASH(); }
