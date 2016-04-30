@@ -975,6 +975,10 @@ arm*)
     CPU_ARCH=arm
     ;;
 
+aarch64*)
+    CPU_ARCH=aarch64
+    ;;
+
 mips|mipsel)
     CPU_ARCH="mips32"
     ;;
@@ -2052,6 +2056,10 @@ x86_64*-*)
 arm*-*)
     ENABLE_ION=1
     AC_DEFINE(JS_CPU_ARM)
+    ;;
+aarch64*-*)
+    ENABLE_ION=0
+    AC_DEFINE(JS_CPU_ARM64)
     ;;
 sparc-*)
 dnl ENABLE_ION=0

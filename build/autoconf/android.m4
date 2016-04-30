@@ -42,6 +42,9 @@ case "$target" in
 arm-*linux*-android*|*-linuxandroid*)
     android_tool_prefix="arm-linux-androideabi"
     ;;
+aarch64-linux*-android*)
+    android_tool_prefix="aarch64-linux-android"
+    ;;
 i?86-*android*)
     android_tool_prefix="i686-linux-android"
     ;;
@@ -116,6 +119,9 @@ case "$target" in
     case "$target_cpu" in
     arm)
         target_name=arm
+        ;;
+    aarch64)
+        target_name=arm64
         ;;
     i?86)
         target_name=x86
@@ -194,6 +200,9 @@ AC_DEFUN([MOZ_ANDROID_CPU_ARCH],
 
 if test "$OS_TARGET" = "Android" -a -z "$gonkdir"; then
     case "${CPU_ARCH}-${MOZ_ARCH}" in
+    aarch64-armv8-a)
+        ANDROID_CPU_ARCH=arm64-v8a
+        ;;
     arm-armv7*)
         ANDROID_CPU_ARCH=armeabi-v7a
         ;;
