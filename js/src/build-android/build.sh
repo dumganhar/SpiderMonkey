@@ -66,7 +66,8 @@ rm -f ./config.cache
              --disable-debug \
              --without-intl-api \
              --with-system-zlib \
-             --disable-threadsafe
+             --disable-threadsafe \
+             --disable-ion --disable-methodjit
 
 # make
 make -j15
@@ -105,13 +106,23 @@ fi
 # build_with_arch
 
 # Build with armv7
-TOOLS_ARCH=arm-linux-androideabi
-TARGET_NAME=arm-linux-androideabi
-CPU_ARCH=armv7-a
-RELEASE_ARCH_DIR=armeabi-v7a
+# TOOLS_ARCH=arm-linux-androideabi
+# TARGET_NAME=arm-linux-androideabi
+# CPU_ARCH=armv7-a
+# RELEASE_ARCH_DIR=armeabi-v7a
+# GCC_VERSION=4.9
+# TOOLNAME_PREFIX=arm-linux-androideabi
+# build_with_arch
+
+# Build with arm64
+TOOLS_ARCH=aarch64-linux-android
+TARGET_NAME=aarch64-linux-android
+CPU_ARCH=armv8-a
+RELEASE_ARCH_DIR=arm64-v8a
 GCC_VERSION=4.9
-TOOLNAME_PREFIX=arm-linux-androideabi
+TOOLNAME_PREFIX=aarch64-linux-android
 build_with_arch
+
 
 # Build with x86
 # TOOLS_ARCH=x86

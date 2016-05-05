@@ -249,14 +249,14 @@ class MacroAssemblerNone : public Assembler
     template <typename T, typename S> void branchAdd32(Condition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void branchSub32(Condition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void branchPtr(Condition, T, S, Label*) { MOZ_CRASH(); }
-    template <typename T, typename S> void branch64(Condition cond, T, S, Label* label) { MOZ_CRASH(); }
-    template <typename T, typename S> void branch64(Condition cond, T, S, Register scratch, Label* label) { MOZ_CRASH(); }
     template <typename T, typename S> void branchTestPtr(Condition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void branchDouble(DoubleCondition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void branchFloat(DoubleCondition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void branchPrivatePtr(Condition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void decBranchPtr(Condition, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void branchTest64(Condition, T, T, S, Label*) { MOZ_CRASH(); }
+    template <typename T, typename S> void branch64(Condition, T, S, Label*) { MOZ_CRASH(); }
+    template <typename T, typename S> void branch64(Condition, T, T, S, Label*) { MOZ_CRASH(); }
     template <typename T, typename S> void mov(T, S) { MOZ_CRASH(); }
     template <typename T, typename S> void movq(T, S) { MOZ_CRASH(); }
     template <typename T, typename S> void movePtr(T, S) { MOZ_CRASH(); }
