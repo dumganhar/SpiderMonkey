@@ -11,7 +11,7 @@
 #include "mozilla/DebugOnly.h"
 #include "mozilla/MemoryReporting.h"
 
-#include "builtin/SIMD.h"
+#include "builtin/TypedObject.h"
 #include "jit/CompileInfo.h"
 #include "jit/ICStubSpace.h"
 #include "jit/IonCode.h"
@@ -34,7 +34,7 @@ enum EnterJitType {
 struct EnterJitData
 {
     explicit EnterJitData(JSContext* cx)
-      : scopeChain(cx),
+      : envChain(cx),
         result(cx)
     {}
 
@@ -48,14 +48,14 @@ struct EnterJitData
     unsigned numActualArgs;
     unsigned osrNumStackValues;
 
-    RootedObject scopeChain;
+    RootedObject envChain;
     RootedValue result;
 
     bool constructing;
 };
 
 typedef void (*EnterJitCode)(void* code, unsigned argc, Value* argv, InterpreterFrame* fp,
-                             CalleeToken calleeToken, JSObject* scopeChain,
+                             CalleeToken calleeToken, JSObject* envChain,
                              size_t numStackValues, Value* vp);
 
 class JitcodeGlobalTable;
@@ -90,7 +90,7 @@ class JitRuntime
   private:
     friend class JitCompartment;
 
-    // Executable allocator for all code except asm.js code and Ion code with
+    // Executable allocator for all code except wasm code and Ion code with
     // patchable backedges (see below).
     ExecutableAllocator execAlloc_;
 
@@ -148,7 +148,7 @@ class JitRuntime
     void* baselineDebugModeOSRHandlerNoFrameRegPopAddr_;
 
     // Map VMFunction addresses to the JitCode of the wrapper.
-    typedef GCRekeyableHashMap<const VMFunction*, JitCode*> VMWrapperMap;
+    using VMWrapperMap = HashMap<const VMFunction*, JitCode*>;
     VMWrapperMap* functionWrappers_;
 
     // Buffer for OSR from baseline to Ion. To avoid holding on to this for
@@ -204,17 +204,26 @@ class JitRuntime
     JitCode* generateBaselineDebugModeOSRHandler(JSContext* cx, uint32_t* noFrameRegPopOffsetOut);
     JitCode* generateVMWrapper(JSContext* cx, const VMFunction& f);
 
+    bool generateTLEventVM(JSContext* cx, MacroAssembler& masm, const VMFunction& f, bool enter);
+
+    inline bool generateTLEnterVM(JSContext* cx, MacroAssembler& masm, const VMFunction& f) {
+        return generateTLEventVM(cx, masm, f, /* enter = */ true);
+    }
+    inline bool generateTLExitVM(JSContext* cx, MacroAssembler& masm, const VMFunction& f) {
+        return generateTLEventVM(cx, masm, f, /* enter = */ false);
+    }
+
   public:
     explicit JitRuntime(JSRuntime* rt);
     ~JitRuntime();
-    bool initialize(JSContext* cx);
+    MOZ_MUST_USE bool initialize(JSContext* cx, js::AutoLockForExclusiveAccess& lock);
 
     uint8_t* allocateOsrTempData(size_t size);
     void freeOsrTempData();
 
-    static void Mark(JSTracer* trc);
+    static void Mark(JSTracer* trc, js::AutoLockForExclusiveAccess& lock);
     static void MarkJitcodeGlobalTableUnconditionally(JSTracer* trc);
-    static bool MarkJitcodeGlobalTableIteratively(JSTracer* trc);
+    static MOZ_MUST_USE bool MarkJitcodeGlobalTableIteratively(JSTracer* trc);
     static void SweepJitcodeGlobalTable(JSRuntime* rt);
 
     ExecutableAllocator& execAlloc() {
@@ -318,11 +327,11 @@ class JitRuntime
 
     JitCode* preBarrier(MIRType type) const {
         switch (type) {
-          case MIRType_Value: return valuePreBarrier_;
-          case MIRType_String: return stringPreBarrier_;
-          case MIRType_Object: return objectPreBarrier_;
-          case MIRType_Shape: return shapePreBarrier_;
-          case MIRType_ObjectGroup: return objectGroupPreBarrier_;
+          case MIRType::Value: return valuePreBarrier_;
+          case MIRType::String: return stringPreBarrier_;
+          case MIRType::Object: return objectPreBarrier_;
+          case MIRType::Shape: return shapePreBarrier_;
+          case MIRType::ObjectGroup: return objectGroupPreBarrier_;
           default: MOZ_CRASH();
         }
     }
@@ -382,12 +391,40 @@ class JitZone
     }
 };
 
+enum class CacheKind;
+class CacheIRStubInfo;
+
+struct CacheIRStubKey : public DefaultHasher<CacheIRStubKey> {
+    struct Lookup {
+        CacheKind kind;
+        const uint8_t* code;
+        uint32_t length;
+
+        Lookup(CacheKind kind, const uint8_t* code, uint32_t length)
+          : kind(kind), code(code), length(length)
+        {}
+    };
+
+    static HashNumber hash(const Lookup& l);
+    static bool match(const CacheIRStubKey& entry, const Lookup& l);
+
+    UniquePtr<CacheIRStubInfo, JS::FreePolicy> stubInfo;
+
+    explicit CacheIRStubKey(CacheIRStubInfo* info) : stubInfo(info) {}
+    CacheIRStubKey(CacheIRStubKey&& other) : stubInfo(Move(other.stubInfo)) { }
+
+    void operator=(CacheIRStubKey&& other) {
+        stubInfo = Move(other.stubInfo);
+    }
+};
+
 class JitCompartment
 {
     friend class JitActivation;
 
+    template<typename Key>
     struct IcStubCodeMapGCPolicy {
-        static bool needsSweep(uint32_t* key, ReadBarrieredJitCode* value) {
+        static bool needsSweep(Key*, ReadBarrieredJitCode* value) {
             return IsAboutToBeFinalized(value);
         }
     };
@@ -397,8 +434,16 @@ class JitCompartment
                                     ReadBarrieredJitCode,
                                     DefaultHasher<uint32_t>,
                                     RuntimeAllocPolicy,
-                                    IcStubCodeMapGCPolicy>;
+                                    IcStubCodeMapGCPolicy<uint32_t>>;
     ICStubCodeMap* stubCodes_;
+
+    // Map ICStub keys to ICStub shared code objects.
+    using CacheIRStubCodeMap = GCHashMap<CacheIRStubKey,
+                                         ReadBarrieredJitCode,
+                                         CacheIRStubKey,
+                                         RuntimeAllocPolicy,
+                                         IcStubCodeMapGCPolicy<CacheIRStubKey>>;
+    CacheIRStubCodeMap* cacheIRStubCodes_;
 
     // Keep track of offset into various baseline stubs' code at return
     // point from called script.
@@ -414,12 +459,14 @@ class JitCompartment
     // CodeGenerator::link.
     JitCode* stringConcatStub_;
     JitCode* regExpMatcherStub_;
+    JitCode* regExpSearcherStub_;
     JitCode* regExpTesterStub_;
 
     mozilla::EnumeratedArray<SimdType, SimdType::Count, ReadBarrieredObject> simdTemplateObjects_;
 
     JitCode* generateStringConcatStub(JSContext* cx);
     JitCode* generateRegExpMatcherStub(JSContext* cx);
+    JitCode* generateRegExpSearcherStub(JSContext* cx);
     JitCode* generateRegExpTesterStub(JSContext* cx);
 
   public:
@@ -453,13 +500,29 @@ class JitCompartment
             return p->value();
         return nullptr;
     }
-    bool putStubCode(JSContext* cx, uint32_t key, Handle<JitCode*> stubCode) {
+    MOZ_MUST_USE bool putStubCode(JSContext* cx, uint32_t key, Handle<JitCode*> stubCode) {
         MOZ_ASSERT(stubCode);
         if (!stubCodes_->putNew(key, stubCode.get())) {
             ReportOutOfMemory(cx);
             return false;
         }
         return true;
+    }
+    JitCode* getCacheIRStubCode(const CacheIRStubKey::Lookup& key, CacheIRStubInfo** stubInfo) {
+        CacheIRStubCodeMap::Ptr p = cacheIRStubCodes_->lookup(key);
+        if (p) {
+            *stubInfo = p->key().stubInfo.get();
+            return p->value();
+        }
+        *stubInfo = nullptr;
+        return nullptr;
+    }
+    MOZ_MUST_USE bool putCacheIRStubCode(const CacheIRStubKey::Lookup& lookup, CacheIRStubKey& key,
+                                         JitCode* stubCode)
+    {
+        CacheIRStubCodeMap::AddPtr p = cacheIRStubCodes_->lookupForAdd(lookup);
+        MOZ_ASSERT(!p);
+        return cacheIRStubCodes_->add(p, Move(key), stubCode);
     }
     void initBaselineCallReturnAddr(void* addr, bool constructing) {
         MOZ_ASSERT(baselineCallReturnAddrs_[constructing] == nullptr);
@@ -492,10 +555,10 @@ class JitCompartment
     JitCompartment();
     ~JitCompartment();
 
-    bool initialize(JSContext* cx);
+    MOZ_MUST_USE bool initialize(JSContext* cx);
 
     // Initialize code stubs only used by Ion, not Baseline.
-    bool ensureIonStubsExist(JSContext* cx);
+    MOZ_MUST_USE bool ensureIonStubsExist(JSContext* cx);
 
     void mark(JSTracer* trc, JSCompartment* compartment);
     void sweep(FreeOp* fop, JSCompartment* compartment);
@@ -508,23 +571,36 @@ class JitCompartment
         return regExpMatcherStub_;
     }
 
-    bool ensureRegExpMatcherStubExists(JSContext* cx) {
+    MOZ_MUST_USE bool ensureRegExpMatcherStubExists(JSContext* cx) {
         if (regExpMatcherStub_)
             return true;
         regExpMatcherStub_ = generateRegExpMatcherStub(cx);
         return regExpMatcherStub_ != nullptr;
     }
 
+    JitCode* regExpSearcherStubNoBarrier() const {
+        return regExpSearcherStub_;
+    }
+
+    MOZ_MUST_USE bool ensureRegExpSearcherStubExists(JSContext* cx) {
+        if (regExpSearcherStub_)
+            return true;
+        regExpSearcherStub_ = generateRegExpSearcherStub(cx);
+        return regExpSearcherStub_ != nullptr;
+    }
+
     JitCode* regExpTesterStubNoBarrier() const {
         return regExpTesterStub_;
     }
 
-    bool ensureRegExpTesterStubExists(JSContext* cx) {
+    MOZ_MUST_USE bool ensureRegExpTesterStubExists(JSContext* cx) {
         if (regExpTesterStub_)
             return true;
         regExpTesterStub_ = generateRegExpTesterStub(cx);
         return regExpTesterStub_ != nullptr;
     }
+
+    size_t sizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
 };
 
 // Called from JSCompartment::discardJitCode().

@@ -44,10 +44,10 @@ function toASCIIUpperCase(s) {
     // since we only care about ASCII characters here, that's OK).
     var result = "";
     for (var i = 0; i < s.length; i++) {
-        var c = s[i];
-        if ("a" <= c && c <= "z")
-            c = callFunction(std_String_toUpperCase, c);
-        result += c;
+        var c = callFunction(std_String_charCodeAt, s, i);
+        result += (0x61 <= c && c <= 0x7A)
+                  ? callFunction(std_String_fromCharCode, null, c & ~0x20)
+                  : s[i];
     }
     return result;
 }
@@ -81,7 +81,7 @@ internalIntlRegExps.currencyDigitsRE = null;
 function getUnicodeLocaleExtensionSequenceRE() {
     return internalIntlRegExps.unicodeLocaleExtensionSequenceRE ||
            (internalIntlRegExps.unicodeLocaleExtensionSequenceRE =
-            regexp_construct_no_statics("-u(?:-[a-z0-9]{2,8})+"));
+            RegExpCreate("-u(?:-[a-z0-9]{2,8})+"));
 }
 
 
@@ -106,7 +106,7 @@ function removeUnicodeExtensions(locale) {
     var extensions;
     var unicodeLocaleExtensionSequenceRE = getUnicodeLocaleExtensionSequenceRE();
     while ((extensions = regexp_exec_no_statics(unicodeLocaleExtensionSequenceRE, left)) !== null) {
-        left = callFunction(std_String_replace, left, extensions[0], "");
+        left = callFunction(String_replace, left, extensions[0], "");
         unicodeLocaleExtensionSequenceRE.lastIndex = 0;
     }
 
@@ -215,8 +215,7 @@ function getLanguageTagRE() {
     var languageTag = "^(?:" + langtag + "|" + privateuse + "|" + grandfathered + ")$";
 
     // Language tags are case insensitive (RFC 5646 section 2.1.1).
-    return (internalIntlRegExps.languageTagRE =
-            regexp_construct_no_statics(languageTag, "i"));
+    return (internalIntlRegExps.languageTagRE = RegExpCreate(languageTag, "i"));
 }
 
 
@@ -262,8 +261,7 @@ function getDuplicateVariantRE() {
     // regular expression to address this.  (Note that there's no worry about
     // case transformation accepting invalid characters here: users have
     // already verified the string is alphanumeric Latin plus "-".)
-    return (internalIntlRegExps.duplicateVariantRE =
-            regexp_construct_no_statics(duplicateVariant, "i"));
+    return (internalIntlRegExps.duplicateVariantRE = RegExpCreate(duplicateVariant, "i"));
 }
 
 
@@ -308,8 +306,7 @@ function getDuplicateSingletonRE() {
     // expression to address this.  (Note that there's no worry about case
     // transformation accepting invalid characters here: users have already
     // verified the string is alphanumeric Latin plus "-".)
-    return (internalIntlRegExps.duplicateSingletonRE =
-            regexp_construct_no_statics(duplicateSingleton, "i"));
+    return (internalIntlRegExps.duplicateSingletonRE = RegExpCreate(duplicateSingleton, "i"));
 }
 
 
@@ -381,7 +378,7 @@ function CanonicalizeLanguageTag(locale) {
     if (callFunction(std_Object_hasOwnProperty, langTagMappings, locale))
         return langTagMappings[locale];
 
-    var subtags = callFunction(std_String_split, locale, "-");
+    var subtags = StringSplitString(ToString(locale), "-");
     var i = 0;
 
     // Handle the standard part: All subtags before the first singleton or "x".
@@ -397,15 +394,18 @@ function CanonicalizeLanguageTag(locale) {
         if (subtag.length === 1 && (i > 0 || subtag === "x"))
             break;
 
-        if (subtag.length === 4) {
-            // 4-character subtags are script codes; their first character
-            // needs to be capitalized. "hans" -> "Hans"
-            subtag = callFunction(std_String_toUpperCase, subtag[0]) +
-                     callFunction(String_substring, subtag, 1);
-        } else if (i !== 0 && subtag.length === 2) {
-            // 2-character subtags that are not in initial position are region
-            // codes; they need to be upper case. "bu" -> "BU"
-            subtag = callFunction(std_String_toUpperCase, subtag);
+        if (i !== 0) {
+            if (subtag.length === 4) {
+                // 4-character subtags that are not in initial position are
+                // script codes; their first character needs to be capitalized.
+                // "hans" -> "Hans"
+                subtag = callFunction(std_String_toUpperCase, subtag[0]) +
+                         callFunction(String_substring, subtag, 1);
+            } else if (subtag.length === 2) {
+                // 2-character subtags that are not in initial position are
+                // region codes; they need to be upper case. "bu" -> "BU"
+                subtag = callFunction(std_String_toUpperCase, subtag);
+            }
         }
         if (callFunction(std_Object_hasOwnProperty, langSubtagMappings, subtag)) {
             // Replace deprecated subtags with their preferred values.
@@ -551,8 +551,8 @@ function DefaultLocaleIgnoringAvailableLocales() {
     }
 
     // Cache the candidate locale until the runtime default locale changes.
-    localeCandidateCache.runtimeDefaultLocale = runtimeDefaultLocale;
     localeCandidateCache.candidateDefaultLocale = candidate;
+    localeCandidateCache.runtimeDefaultLocale = runtimeDefaultLocale;
 
     assert(IsStructurallyValidLanguageTag(candidate),
            "the candidate must be structurally valid");
@@ -600,8 +600,8 @@ function DefaultLocale() {
     assert(localeContainsNoUnicodeExtensions(locale),
            "the computed default locale must not contain a Unicode extension sequence");
 
-    localeCache.runtimeDefaultLocale = runtimeDefaultLocale;
     localeCache.defaultLocale = locale;
+    localeCache.runtimeDefaultLocale = runtimeDefaultLocale;
 
     return locale;
 }
@@ -614,8 +614,7 @@ function DefaultLocale() {
  */
 function getIsWellFormedCurrencyCodeRE() {
     return internalIntlRegExps.isWellFormedCurrencyCodeRE ||
-           (internalIntlRegExps.isWellFormedCurrencyCodeRE =
-            regexp_construct_no_statics("[^A-Z]"));
+           (internalIntlRegExps.isWellFormedCurrencyCodeRE = RegExpCreate("[^A-Z]"));
 }
 function IsWellFormedCurrencyCode(currency) {
     var c = ToString(currency);
@@ -623,6 +622,93 @@ function IsWellFormedCurrencyCode(currency) {
     if (normalized.length !== 3)
         return false;
     return !regexp_test_no_statics(getIsWellFormedCurrencyCodeRE(), normalized);
+}
+
+
+var timeZoneCache = {
+    icuDefaultTimeZone: undefined,
+    defaultTimeZone: undefined,
+};
+
+
+/**
+ * 6.4.2 CanonicalizeTimeZoneName ( timeZone )
+ *
+ * Canonicalizes the given IANA time zone name.
+ *
+ * ES2017 Intl draft rev 4a23f407336d382ed5e3471200c690c9b020b5f3
+ */
+function CanonicalizeTimeZoneName(timeZone) {
+    assert(typeof timeZone === "string", "CanonicalizeTimeZoneName");
+
+    // Step 1. (Not applicable, the input is already a valid IANA time zone.)
+    assert(timeZone !== "Etc/Unknown", "Invalid time zone");
+    assert(timeZone === intl_IsValidTimeZoneName(timeZone), "Time zone name not normalized");
+
+    // Step 2.
+    var ianaTimeZone = intl_canonicalizeTimeZone(timeZone);
+    assert(ianaTimeZone !== "Etc/Unknown", "Invalid canonical time zone");
+    assert(ianaTimeZone === intl_IsValidTimeZoneName(ianaTimeZone), "Unsupported canonical time zone");
+
+    // Step 3.
+    if (ianaTimeZone === "Etc/UTC" || ianaTimeZone === "Etc/GMT") {
+        // ICU/CLDR canonicalizes Etc/UCT to Etc/GMT, but following IANA and
+        // ECMA-402 to the letter means Etc/UCT is a separate time zone.
+        if (timeZone === "Etc/UCT" || timeZone === "UCT")
+            ianaTimeZone = "Etc/UCT";
+        else
+            ianaTimeZone = "UTC";
+    }
+
+    // Step 4.
+    return ianaTimeZone;
+}
+
+
+/**
+ * 6.4.3 DefaultTimeZone ()
+ *
+ * Returns the IANA time zone name for the host environment's current time zone.
+ *
+ * ES2017 Intl draft rev 4a23f407336d382ed5e3471200c690c9b020b5f3
+ */
+function DefaultTimeZone() {
+    const icuDefaultTimeZone = intl_defaultTimeZone();
+    if (timeZoneCache.icuDefaultTimeZone === icuDefaultTimeZone)
+        return timeZoneCache.defaultTimeZone;
+
+    // Verify that the current ICU time zone is a valid ECMA-402 time zone.
+    var timeZone = intl_IsValidTimeZoneName(icuDefaultTimeZone);
+    if (timeZone === null) {
+        // Before defaulting to "UTC", try to represent the default time zone
+        // using the Etc/GMT + offset format. This format only accepts full
+        // hour offsets.
+        const msPerHour = 60 * 60 * 1000;
+        var offset = intl_defaultTimeZoneOffset();
+        assert(offset === (offset | 0),
+               "milliseconds offset shouldn't be able to exceed int32_t range");
+        var offsetHours = offset / msPerHour, offsetHoursFraction = offset % msPerHour;
+        if (offsetHoursFraction === 0) {
+            // Etc/GMT + offset uses POSIX-style signs, i.e. a positive offset
+            // means a location west of GMT.
+            timeZone = "Etc/GMT" + (offsetHours < 0 ? "+" : "-") + std_Math_abs(offsetHours);
+
+            // Check if the fallback is valid.
+            timeZone = intl_IsValidTimeZoneName(timeZone);
+        }
+
+        // Fallback to "UTC" if everything else fails.
+        if (timeZone === null)
+            timeZone = "UTC";
+    }
+
+    // Canonicalize the ICU time zone, e.g. change Etc/UTC to UTC.
+    var defaultTimeZone = CanonicalizeTimeZoneName(timeZone);
+
+    timeZoneCache.defaultTimeZone = defaultTimeZone;
+    timeZoneCache.icuDefaultTimeZone = icuDefaultTimeZone;
+
+    return defaultTimeZone;
 }
 
 
@@ -665,7 +751,7 @@ function CanonicalizeLocaleList(locales) {
     if (typeof locales === "string")
         locales = [locales];
     var O = ToObject(locales);
-    var len = TO_UINT32(O.length);
+    var len = ToLength(O.length);
     var k = 0;
     while (k < len) {
         // Don't call ToString(k) - SpiderMonkey is faster with integers.
@@ -841,7 +927,7 @@ function ResolveLocale(availableLocales, requestedLocales, options, relevantExte
         extensionIndex = r.extensionIndex;
 
         // Steps 5.d-e.
-        extensionSubtags = callFunction(std_String_split, extension, "-");
+        extensionSubtags = StringSplitString(ToString(extension), "-");
         extensionSubtagsLength = extensionSubtags.length;
     }
 
@@ -1940,8 +2026,7 @@ var currencyDigits = {
  */
 function getCurrencyDigitsRE() {
     return internalIntlRegExps.currencyDigitsRE ||
-           (internalIntlRegExps.currencyDigitsRE =
-            regexp_construct_no_statics("^[A-Z]{3}$"));
+           (internalIntlRegExps.currencyDigitsRE = RegExpCreate("^[A-Z]{3}$"));
 }
 function CurrencyDigits(currency) {
     assert(typeof currency === "string", "CurrencyDigits");
@@ -2098,7 +2183,7 @@ function resolveDateTimeFormatInternals(lazyDateTimeFormatData) {
     //         hour12: true / false,  // optional
     //       }
     //
-    //     timeZone: undefined / "UTC",
+    //     timeZone: IANA time zone name,
     //
     //     formatOpt: // *second* opt computed in InitializeDateTimeFormat
     //       {
@@ -2139,7 +2224,12 @@ function resolveDateTimeFormatInternals(lazyDateTimeFormatData) {
     var dataLocale = r.dataLocale;
 
     // Steps 15-17.
-    internalProps.timeZone = lazyDateTimeFormatData.timeZone;
+    var tz = lazyDateTimeFormatData.timeZone;
+    if (tz === undefined) {
+        // Step 16.
+        tz = DefaultTimeZone();
+    }
+    internalProps.timeZone = tz;
 
     // Step 18.
     var formatOpt = lazyDateTimeFormatData.formatOpt;
@@ -2230,7 +2320,7 @@ function InitializeDateTimeFormat(dateTimeFormat, locales, options) {
     //         localeMatcher: "lookup" / "best fit",
     //       }
     //
-    //     timeZone: undefined / "UTC",
+    //     timeZone: IANA time zone name,
     //
     //     formatOpt: // *second* opt computed in InitializeDateTimeFormat
     //       {
@@ -2269,9 +2359,16 @@ function InitializeDateTimeFormat(dateTimeFormat, locales, options) {
     // Steps 15-17.
     var tz = options.timeZone;
     if (tz !== undefined) {
-        tz = toASCIIUpperCase(ToString(tz));
-        if (tz !== "UTC")
+        // Step 15.a.
+        tz = ToString(tz);
+
+        // Step 15.b.
+        var timeZone = intl_IsValidTimeZoneName(tz);
+        if (timeZone === null)
             ThrowRangeError(JSMSG_INVALID_TIME_ZONE, tz);
+
+        // Step 15.c.
+        tz = CanonicalizeTimeZoneName(timeZone);
     }
     lazyDateTimeFormatData.timeZone = tz;
 
@@ -2294,7 +2391,7 @@ function InitializeDateTimeFormat(dateTimeFormat, locales, options) {
     // For some reason (ICU not exposing enough interface?) we drop the
     // requested format matcher on the floor after this.  In any case, even if
     // doing so is justified, we have to do this work here in case it triggers
-    // getters or similar.
+    // getters or similar. (bug 852837)
     var formatMatcher =
         GetOption(options, "formatMatcher", "string", ["basic", "best fit"],
                   "best fit");
@@ -2741,32 +2838,16 @@ function Intl_DateTimeFormat_format_get() {
 }
 
 
-function dateTimeFormatFormatToPartsToBind() {
+function Intl_DateTimeFormat_formatToParts() {
+    // Check "this DateTimeFormat object" per introduction of section 12.3.
+    getDateTimeFormatInternals(this, "formatToParts");
+
     // Steps 1.a.i-ii
     var date = arguments.length > 0 ? arguments[0] : undefined;
     var x = (date === undefined) ? std_Date_now() : ToNumber(date);
 
     // Step 1.a.iii.
     return intl_FormatDateTime(this, x, true);
-}
-
-
-function Intl_DateTimeFormat_formatToParts_get() {
-    // Check "this DateTimeFormat object" per introduction of section 12.3.
-    var internals = getDateTimeFormatInternals(this, "formatToParts");
-
-    // Step 1.
-    if (internals.boundFormatToParts === undefined) {
-        // Step 1.a.
-        var F = dateTimeFormatFormatToPartsToBind;
-
-        // Step 1.b-d.
-        var bf = callFunction(FunctionBind, F, this);
-        internals.boundFormatToParts = bf;
-    }
-
-    // Step 2.
-    return internals.boundFormatToParts;
 }
 
 
@@ -2888,4 +2969,40 @@ function resolveICUPattern(pattern, result) {
                 _DefineDataProperty(result, "hour12", false);
         }
     }
+}
+
+function Intl_getCanonicalLocales(locales) {
+  let codes = CanonicalizeLocaleList(locales);
+  let result = [];
+
+  let len = codes.length;
+  let k = 0;
+
+  while (k < len) {
+    _DefineDataProperty(result, k, codes[k]);
+    k++;
+  }
+  return result;
+}
+
+function Intl_getCalendarInfo(locales) {
+  const requestedLocales = CanonicalizeLocaleList(locales);
+
+  const DateTimeFormat = dateTimeFormatInternalProperties;
+  const localeData = DateTimeFormat.localeData;
+
+  const localeOpt = new Record();
+  localeOpt.localeMatcher = "best fit";
+
+  const r = ResolveLocale(callFunction(DateTimeFormat.availableLocales, DateTimeFormat),
+                          requestedLocales,
+                          localeOpt,
+                          DateTimeFormat.relevantExtensionKeys,
+                          localeData);
+
+  const result = intl_GetCalendarInfo(r.locale);
+  result.calendar = r.ca;
+  result.locale = r.locale;
+
+  return result;
 }

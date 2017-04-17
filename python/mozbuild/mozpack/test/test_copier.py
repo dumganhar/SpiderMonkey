@@ -337,8 +337,8 @@ class TestFileCopier(TestWithTmpDir):
         # Make file and directory unwritable. Reminder: making a directory
         # unwritable prevents modifications (including deletes) from the list
         # of files in that directory.
-        os.chmod(p, 0400)
-        os.chmod(self.tmpdir, 0400)
+        os.chmod(p, 0o400)
+        os.chmod(self.tmpdir, 0o400)
 
         copier = FileCopier()
         copier.add('dummy', GeneratedFile('content'))
@@ -508,6 +508,22 @@ class TestJarrer(unittest.TestCase):
         self.assertEqual([f.filename for f in jar], preloaded +
                          [p for p in copier.paths() if not p in preloaded])
         self.assertEqual(jar.last_preloaded, preloaded[-1])
+
+
+    def test_jarrer_compress(self):
+        copier = Jarrer()
+        copier.add('foo/bar', GeneratedFile('ffffff'))
+        copier.add('foo/qux', GeneratedFile('ffffff'), compress=False)
+
+        dest = MockDest()
+        copier.copy(dest)
+        self.check_jar(dest, copier)
+
+        dest.seek(0)
+        jar = JarReader(fileobj=dest)
+        self.assertTrue(jar['foo/bar'].compressed)
+        self.assertFalse(jar['foo/qux'].compressed)
+
 
 if __name__ == '__main__':
     mozunit.main()

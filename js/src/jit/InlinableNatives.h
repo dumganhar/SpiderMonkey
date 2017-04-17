@@ -14,7 +14,6 @@
     _(ArrayPop)                     \
     _(ArrayShift)                   \
     _(ArrayPush)                    \
-    _(ArrayConcat)                  \
     _(ArraySlice)                   \
     _(ArraySplice)                  \
                                     \
@@ -22,7 +21,6 @@
     _(AtomicsExchange)              \
     _(AtomicsLoad)                  \
     _(AtomicsStore)                 \
-    _(AtomicsFence)                 \
     _(AtomicsAdd)                   \
     _(AtomicsSub)                   \
     _(AtomicsAnd)                   \
@@ -67,21 +65,34 @@
     _(MathCbrt)                     \
                                     \
     _(RegExpMatcher)                \
+    _(RegExpSearcher)               \
     _(RegExpTester)                 \
     _(IsRegExpObject)               \
+    _(RegExpPrototypeOptimizable)   \
+    _(RegExpInstanceOptimizable)    \
+    _(GetFirstDollarIndex)          \
                                     \
     _(String)                       \
-    _(StringSplit)                  \
     _(StringCharCodeAt)             \
     _(StringFromCharCode)           \
+    _(StringFromCodePoint)          \
     _(StringCharAt)                 \
-    _(StringReplace)                \
+                                    \
+    _(IntrinsicStringReplaceString) \
+    _(IntrinsicStringSplitString)   \
                                     \
     _(ObjectCreate)                 \
                                     \
     _(SimdInt32x4)                  \
+    _(SimdUint32x4)                 \
+    _(SimdInt16x8)                  \
+    _(SimdUint16x8)                 \
+    _(SimdInt8x16)                  \
+    _(SimdUint8x16)                 \
     _(SimdFloat32x4)                \
     _(SimdBool32x4)                 \
+    _(SimdBool16x8)                 \
+    _(SimdBool8x16)                 \
                                     \
     _(TestBailout)                  \
     _(TestAssertFloat32)            \
@@ -95,19 +106,31 @@
     _(IntrinsicUnsafeGetBooleanFromReservedSlot) \
                                     \
     _(IntrinsicIsCallable)          \
+    _(IntrinsicIsConstructor)       \
     _(IntrinsicToObject)            \
     _(IntrinsicIsObject)            \
+    _(IntrinsicIsWrappedArrayConstructor) \
     _(IntrinsicToInteger)           \
     _(IntrinsicToString)            \
     _(IntrinsicIsConstructing)      \
     _(IntrinsicSubstringKernel)     \
     _(IntrinsicDefineDataProperty)  \
+    _(IntrinsicObjectHasPrototype)  \
                                     \
     _(IntrinsicIsArrayIterator)     \
     _(IntrinsicIsMapIterator)       \
+    _(IntrinsicIsSetIterator)       \
     _(IntrinsicIsStringIterator)    \
     _(IntrinsicIsListIterator)      \
                                     \
+    _(IntrinsicGetNextMapEntryForIterator) \
+                                    \
+    _(IntrinsicGetNextSetEntryForIterator) \
+                                    \
+    _(IntrinsicArrayBufferByteLength) \
+    _(IntrinsicPossiblyWrappedArrayBufferByteLength) \
+                                    \
+    _(TypedArrayConstructor)        \
     _(IntrinsicIsTypedArray)        \
     _(IntrinsicIsPossiblyWrappedTypedArray) \
     _(IntrinsicTypedArrayLength)    \

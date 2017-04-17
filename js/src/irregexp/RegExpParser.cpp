@@ -41,8 +41,10 @@ using namespace js::irregexp;
 RegExpBuilder::RegExpBuilder(LifoAlloc* alloc)
   : alloc(alloc),
     pending_empty_(false),
-    characters_(nullptr),
-    last_added_(ADD_NONE)
+    characters_(nullptr)
+#ifdef DEBUG
+  , last_added_(ADD_NONE)
+#endif
 {}
 
 void
@@ -53,7 +55,9 @@ RegExpBuilder::FlushCharacters()
         RegExpTree* atom = alloc->newInfallible<RegExpAtom>(characters_);
         characters_ = nullptr;
         text_.Add(alloc, atom);
+#ifdef DEBUG
         last_added_ = ADD_ATOM;
+#endif
     }
 }
 
@@ -82,7 +86,9 @@ RegExpBuilder::AddCharacter(char16_t c)
     if (characters_ == nullptr)
         characters_ = alloc->newInfallible<CharacterVector>(*alloc);
     characters_->append(c);
+#ifdef DEBUG
     last_added_ = ADD_CHAR;
+#endif
 }
 
 void
@@ -105,7 +111,9 @@ RegExpBuilder::AddAtom(RegExpTree* term)
         FlushText();
         terms_.Add(alloc, term);
     }
+#ifdef DEBUG
     last_added_ = ADD_ATOM;
+#endif
 }
 
 void
@@ -113,7 +121,9 @@ RegExpBuilder::AddAssertion(RegExpTree* assert)
 {
     FlushText();
     terms_.Add(alloc, assert);
+#ifdef DEBUG
     last_added_ = ADD_ASSERT;
+#endif
 }
 
 void
@@ -136,7 +146,9 @@ RegExpBuilder::FlushTerms()
         alternative = alloc->newInfallible<RegExpAlternative>(terms_.GetList(alloc));
     alternatives_.Add(alloc, alternative);
     terms_.Clear();
+#ifdef DEBUG
     last_added_ = ADD_NONE;
+#endif
 }
 
 RegExpTree*
@@ -186,7 +198,9 @@ RegExpBuilder::AddQuantifierToAtom(int min, int max,
         atom = terms_.RemoveLast();
         if (atom->max_match() == 0) {
             // Guaranteed to only match an empty string.
+#ifdef DEBUG
             last_added_ = ADD_TERM;
+#endif
             if (min == 0)
                 return;
             terms_.Add(alloc, atom);
@@ -197,7 +211,9 @@ RegExpBuilder::AddQuantifierToAtom(int min, int max,
         MOZ_CRASH("Bad call");
     }
     terms_.Add(alloc, alloc->newInfallible<RegExpQuantifier>(min, max, quantifier_type, atom));
+#ifdef DEBUG
     last_added_ = ADD_TERM;
+#endif
 }
 
 // ----------------------------------------------------------------------------
@@ -260,7 +276,7 @@ HexValue(uint32_t c)
 }
 
 template <typename CharT>
-size_t
+widechar
 RegExpParser<CharT>::ParseOctalLiteral()
 {
     MOZ_ASSERT('0' <= current() && current() <= '7');
@@ -281,7 +297,7 @@ RegExpParser<CharT>::ParseOctalLiteral()
 
 template <typename CharT>
 bool
-RegExpParser<CharT>::ParseHexEscape(int length, size_t* value)
+RegExpParser<CharT>::ParseHexEscape(int length, widechar* value)
 {
     const CharT* start = position();
     uint32_t val = 0;
@@ -305,7 +321,7 @@ RegExpParser<CharT>::ParseHexEscape(int length, size_t* value)
 
 template <typename CharT>
 bool
-RegExpParser<CharT>::ParseBracedHexEscape(size_t* value)
+RegExpParser<CharT>::ParseBracedHexEscape(widechar* value)
 {
     MOZ_ASSERT(current() == '{');
     Advance();
@@ -347,7 +363,7 @@ RegExpParser<CharT>::ParseBracedHexEscape(size_t* value)
 
 template <typename CharT>
 bool
-RegExpParser<CharT>::ParseTrailSurrogate(size_t* value)
+RegExpParser<CharT>::ParseTrailSurrogate(widechar* value)
 {
     if (current() != '\\')
         return false;
@@ -510,6 +526,7 @@ RegExpParser<CharT>::ParseClassCharacterEscape(widechar* code)
       case '6': case '7':
         if (unicode_) {
             if (current() == '0') {
+                Advance();
                 *code = 0;
                 return true;
             }
@@ -524,7 +541,7 @@ RegExpParser<CharT>::ParseClassCharacterEscape(widechar* code)
         return true;
       case 'x': {
         Advance();
-        size_t value;
+        widechar value;
         if (ParseHexEscape(2, &value)) {
             *code = value;
             return true;
@@ -540,7 +557,7 @@ RegExpParser<CharT>::ParseClassCharacterEscape(widechar* code)
       }
       case 'u': {
         Advance();
-        size_t value;
+        widechar value;
         if (unicode_) {
             if (current() == '{') {
                 if (!ParseBracedHexEscape(&value))
@@ -550,7 +567,7 @@ RegExpParser<CharT>::ParseClassCharacterEscape(widechar* code)
             }
             if (ParseHexEscape(4, &value)) {
                 if (unicode::IsLeadSurrogate(value)) {
-                    size_t trail;
+                    widechar trail;
                     if (ParseTrailSurrogate(&trail)) {
                         *code = unicode::UTF16Decode(value, trail);
                         return true;
@@ -765,10 +782,10 @@ NegateUnicodeRanges(LifoAlloc* alloc, InfallibleVector<RangeType, 1>** ranges,
         const RangeType& range = (**ranges)[i];
         for (size_t j = 0; j < tmp_ranges->length(); j++) {
             const RangeType& tmpRange = (*tmp_ranges)[j];
-            size_t from1 = tmpRange.from();
-            size_t to1 = tmpRange.to();
-            size_t from2 = range.from();
-            size_t to2 = range.to();
+            auto from1 = tmpRange.from();
+            auto to1 = tmpRange.to();
+            auto from2 = range.from();
+            auto to2 = range.to();
 
             if (from1 < from2) {
                 if (to1 < from2) {
@@ -856,6 +873,7 @@ UnicodeRangesAtom(LifoAlloc* alloc,
 #define CALL_CALC(FROM, TO, LEAD, TRAIL_FROM, TRAIL_TO, DIFF) \
         CalculateCaseInsensitiveRanges(alloc, FROM, TO, DIFF, wide_ranges, &tmp_wide_ranges);
         FOR_EACH_NON_BMP_CASE_FOLDING(CALL_CALC)
+        FOR_EACH_NON_BMP_REV_CASE_FOLDING(CALL_CALC)
 #undef CALL_CALC
 
         if (tmp_wide_ranges) {
@@ -908,8 +926,8 @@ UnicodeRangesAtom(LifoAlloc* alloc,
         const WideCharRange& range = (*wide_ranges)[i];
         widechar from = range.from();
         widechar to = range.to();
-        size_t from_lead, from_trail;
-        size_t to_lead, to_trail;
+        char16_t from_lead, from_trail;
+        char16_t to_lead, to_trail;
 
         unicode::UTF16Encode(from, &from_lead, &from_trail);
         if (from == to) {
@@ -1297,6 +1315,7 @@ SurrogatePairAtom(LifoAlloc* alloc, char16_t lead, char16_t trail, bool ignore_c
         if (lead == LEAD &&trail >= TRAIL_FROM && trail <= TRAIL_TO) \
             return CaseFoldingSurrogatePairAtom(alloc, lead, trail, DIFF);
         FOR_EACH_NON_BMP_CASE_FOLDING(CALL_ATOM)
+        FOR_EACH_NON_BMP_REV_CASE_FOLDING(CALL_ATOM)
 #undef CALL_ATOM
     }
 
@@ -1617,7 +1636,7 @@ RegExpParser<CharT>::ParseDisjunction()
                 }
 
                 Advance();
-                size_t octal = ParseOctalLiteral();
+                widechar octal = ParseOctalLiteral();
                 builder->AddCharacter(octal);
                 break;
               }
@@ -1665,7 +1684,7 @@ RegExpParser<CharT>::ParseDisjunction()
               }
               case 'x': {
                 Advance(2);
-                size_t value;
+                widechar value;
                 if (ParseHexEscape(2, &value)) {
                     builder->AddCharacter(value);
                 } else {
@@ -1677,7 +1696,7 @@ RegExpParser<CharT>::ParseDisjunction()
               }
               case 'u': {
                 Advance(2);
-                size_t value;
+                widechar value;
                 if (unicode_) {
                     if (current() == '{') {
                         if (!ParseBracedHexEscape(&value))
@@ -1687,7 +1706,7 @@ RegExpParser<CharT>::ParseDisjunction()
                         } else if (unicode::IsTrailSurrogate(value)) {
                             builder->AddAtom(TrailSurrogateAtom(alloc, value));
                         } else if (value >= unicode::NonBMPMin) {
-                            size_t lead, trail;
+                            char16_t lead, trail;
                             unicode::UTF16Encode(value, &lead, &trail);
                             builder->AddAtom(SurrogatePairAtom(alloc, lead, trail,
                                                                ignore_case_));
@@ -1696,7 +1715,7 @@ RegExpParser<CharT>::ParseDisjunction()
                         }
                     } else if (ParseHexEscape(4, &value)) {
                         if (unicode::IsLeadSurrogate(value)) {
-                            size_t trail;
+                            widechar trail;
                             if (ParseTrailSurrogate(&trail)) {
                                 builder->AddAtom(SurrogatePairAtom(alloc, value, trail,
                                                                    ignore_case_));
@@ -1813,7 +1832,7 @@ template <typename CharT>
 static bool
 ParsePattern(frontend::TokenStream& ts, LifoAlloc& alloc, const CharT* chars, size_t length,
              bool multiline, bool match_only, bool unicode, bool ignore_case,
-             RegExpCompileData* data)
+             bool global, bool sticky, RegExpCompileData* data)
 {
     if (match_only) {
         // Try to strip a leading '.*' from the RegExp, but only if it is not
@@ -1827,9 +1846,13 @@ ParsePattern(frontend::TokenStream& ts, LifoAlloc& alloc, const CharT* chars, si
 
         // Try to strip a trailing '.*' from the RegExp, which as above will
         // affect the captures but not whether there is a match. Only do this
-        // when there are no other meta characters in the RegExp, so that we
-        // are sure this will not affect how the RegExp is parsed.
+        // when the following conditions are met:
+        //   1. there are no other meta characters in the RegExp, so that we
+        //      are sure this will not affect how the RegExp is parsed
+        //   2. global and sticky flags are not set, as lastIndex needs to be
+        //      set properly on global or sticky match
         if (length >= 3 && !HasRegExpMetaChars(chars, length - 2) &&
+            !global && !sticky &&
             chars[length - 2] == '.' && chars[length - 1] == '*')
         {
             length -= 2;
@@ -1850,14 +1873,14 @@ ParsePattern(frontend::TokenStream& ts, LifoAlloc& alloc, const CharT* chars, si
 bool
 irregexp::ParsePattern(frontend::TokenStream& ts, LifoAlloc& alloc, JSAtom* str,
                        bool multiline, bool match_only, bool unicode, bool ignore_case,
-                       RegExpCompileData* data)
+                       bool global, bool sticky, RegExpCompileData* data)
 {
     JS::AutoCheckCannotGC nogc;
     return str->hasLatin1Chars()
            ? ::ParsePattern(ts, alloc, str->latin1Chars(nogc), str->length(),
-                            multiline, match_only, unicode, ignore_case, data)
+                            multiline, match_only, unicode, ignore_case, global, sticky, data)
            : ::ParsePattern(ts, alloc, str->twoByteChars(nogc), str->length(),
-                            multiline, match_only, unicode, ignore_case, data);
+                            multiline, match_only, unicode, ignore_case, global, sticky, data);
 }
 
 template <typename CharT>

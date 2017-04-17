@@ -10,6 +10,9 @@
 #include "mozilla/MathAlgorithms.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/SizePrintfMacros.h"
+#include "mozilla/Sprintf.h"
+
+#include <algorithm>
 
 #include "jsprf.h"
 
@@ -21,6 +24,8 @@
 #include "vm/SPSProfiler.h"
 
 #include "jsscriptinlines.h"
+
+#include "vm/TypeInference-inl.h"
 
 using mozilla::Maybe;
 
@@ -216,16 +221,17 @@ JitcodeGlobalEntry::BaselineEntry::destroy()
     str_ = nullptr;
 }
 
-static inline void
-RejoinEntry(JSRuntime* rt, const JitcodeGlobalEntry::IonCacheEntry& cache,
-            void* ptr, JitcodeGlobalEntry* entry)
+static inline JitcodeGlobalEntry&
+RejoinEntry(JSRuntime* rt, const JitcodeGlobalEntry::IonCacheEntry& cache, void* ptr)
 {
     MOZ_ASSERT(cache.containsPointer(ptr));
 
     // There must exist an entry for the rejoin addr if this entry exists.
     JitRuntime* jitrt = rt->jitRuntime();
-    jitrt->getJitcodeGlobalTable()->lookupInfallible(cache.rejoinAddr(), entry, rt);
-    MOZ_ASSERT(entry->isIon());
+    JitcodeGlobalEntry& entry =
+        jitrt->getJitcodeGlobalTable()->lookupInfallible(cache.rejoinAddr());
+    MOZ_ASSERT(entry.isIon());
+    return entry;
 }
 
 void*
@@ -239,8 +245,7 @@ JitcodeGlobalEntry::IonCacheEntry::callStackAtAddr(JSRuntime* rt, void* ptr,
                                                    BytecodeLocationVector& results,
                                                    uint32_t* depth) const
 {
-    JitcodeGlobalEntry entry;
-    RejoinEntry(rt, *this, ptr, &entry);
+    const JitcodeGlobalEntry& entry = RejoinEntry(rt, *this, ptr);
     return entry.callStackAtAddr(rt, rejoinAddr(), results, depth);
 }
 
@@ -249,8 +254,7 @@ JitcodeGlobalEntry::IonCacheEntry::callStackAtAddr(JSRuntime* rt, void* ptr,
                                                    const char** results,
                                                    uint32_t maxResults) const
 {
-    JitcodeGlobalEntry entry;
-    RejoinEntry(rt, *this, ptr, &entry);
+    const JitcodeGlobalEntry& entry = RejoinEntry(rt, *this, ptr);
     return entry.callStackAtAddr(rt, rejoinAddr(), results, maxResults);
 }
 
@@ -259,8 +263,7 @@ JitcodeGlobalEntry::IonCacheEntry::youngestFrameLocationAtAddr(JSRuntime* rt, vo
                                                                JSScript** script,
                                                                jsbytecode** pc) const
 {
-    JitcodeGlobalEntry entry;
-    RejoinEntry(rt, *this, ptr, &entry);
+    const JitcodeGlobalEntry& entry = RejoinEntry(rt, *this, ptr);
     return entry.youngestFrameLocationAtAddr(rt, rejoinAddr(), script, pc);
 }
 
@@ -330,7 +333,7 @@ JitcodeGlobalEntry::createScriptString(JSContext* cx, JSScript* script, size_t* 
     size_t linenoLength = 0;
     char linenoStr[15];
     if (hasName || (script->functionNonDelazifying() || script->isForEval())) {
-        linenoLength = JS_snprintf(linenoStr, 15, "%" PRIuSIZE, script->lineno());
+        linenoLength = SprintfLiteral(linenoStr, "%" PRIuSIZE, script->lineno());
         hasLineno = true;
     }
 
@@ -432,54 +435,28 @@ JitcodeGlobalTable::Enum::removeFront()
     table_.releaseEntry(*cur_, prevTower_, rt_);
 }
 
-bool
-JitcodeGlobalTable::lookup(void* ptr, JitcodeGlobalEntry* result, JSRuntime* rt)
+const JitcodeGlobalEntry&
+JitcodeGlobalTable::lookupForSamplerInfallible(void* ptr, JSRuntime* rt, uint32_t sampleBufferGen)
 {
-    MOZ_ASSERT(result);
-
     JitcodeGlobalEntry* entry = lookupInternal(ptr);
-    if (!entry)
-        return false;
-
-    *result = *entry;
-    return true;
-}
-
-bool
-JitcodeGlobalTable::lookupForSampler(void* ptr, JitcodeGlobalEntry* result, JSRuntime* rt,
-                                     uint32_t sampleBufferGen)
-{
-    MOZ_ASSERT(result);
-
-    JitcodeGlobalEntry* entry = lookupInternal(ptr);
-    if (!entry)
-        return false;
+    MOZ_ASSERT(entry);
 
     entry->setGeneration(sampleBufferGen);
 
     // IonCache entries must keep their corresponding Ion entries alive.
     if (entry->isIonCache()) {
-        JitcodeGlobalEntry rejoinEntry;
-        RejoinEntry(rt, entry->ionCacheEntry(), ptr, &rejoinEntry);
+        JitcodeGlobalEntry& rejoinEntry = RejoinEntry(rt, entry->ionCacheEntry(), ptr);
         rejoinEntry.setGeneration(sampleBufferGen);
     }
 
-#ifdef DEBUG
-    // JitcodeGlobalEntries are marked during the beginning of the sweep
-    // phase. A read barrier is not needed, as any JS frames sampled during
-    // the sweep phase of the GC must be on stack, and on-stack frames must
-    // already be marked at the beginning of the sweep phase. This assumption
-    // is verified below.
-    if (rt->isHeapBusy() &&
-        rt->gc.stats.currentPhase() >= gcstats::PHASE_FINALIZE_START &&
-        rt->gc.stats.currentPhase() <= gcstats::PHASE_FINALIZE_END)
-    {
-        MOZ_ASSERT(entry->isMarkedFromAnyThread(rt));
-    }
-#endif
+    // JitcodeGlobalEntries are marked at the end of the mark phase. A read
+    // barrier is not needed. Any JS frames sampled during the sweep phase of
+    // the GC must be on stack, and on-stack frames must already be marked at
+    // the beginning of the sweep phase. It's not possible to assert this here
+    // as we may not be running on the main thread when called from the gecko
+    // profiler.
 
-    *result = *entry;
-    return true;
+    return *entry;
 }
 
 JitcodeGlobalEntry*
@@ -675,7 +652,7 @@ JitcodeGlobalTable::generateTowerHeight()
             break;
         result++;
     }
-    return result + 1;
+    return (std::max)(1U, result);
 }
 
 JitcodeSkiplistTower*
@@ -747,7 +724,7 @@ JitcodeGlobalTable::setAllEntriesAsExpired(JSRuntime* rt)
 struct Unconditionally
 {
     template <typename T>
-    static bool ShouldMark(T* thingp) { return true; }
+    static bool ShouldMark(JSRuntime* rt, T* thingp) { return true; }
 };
 
 void
@@ -766,13 +743,13 @@ JitcodeGlobalTable::markUnconditionally(JSTracer* trc)
 struct IfUnmarked
 {
     template <typename T>
-    static bool ShouldMark(T* thingp) { return !IsMarkedUnbarriered(thingp); }
+    static bool ShouldMark(JSRuntime* rt, T* thingp) { return !IsMarkedUnbarriered(rt, thingp); }
 };
 
 template <>
-bool IfUnmarked::ShouldMark<TypeSet::Type>(TypeSet::Type* type)
+bool IfUnmarked::ShouldMark<TypeSet::Type>(JSRuntime* rt, TypeSet::Type* type)
 {
-    return !TypeSet::IsTypeMarked(type);
+    return !TypeSet::IsTypeMarked(rt, type);
 }
 
 bool
@@ -823,7 +800,7 @@ JitcodeGlobalTable::markIteratively(JSTracer* trc)
         // mapping, alive as well.
         if (!entry->isSampled(gen, lapCount)) {
             entry->setAsExpired();
-            if (!entry->baseEntry().isJitcodeMarkedFromAnyThread())
+            if (!entry->baseEntry().isJitcodeMarkedFromAnyThread(trc->runtime()))
                 continue;
         }
 
@@ -859,7 +836,7 @@ template <class ShouldMarkProvider>
 bool
 JitcodeGlobalEntry::BaseEntry::markJitcode(JSTracer* trc)
 {
-    if (ShouldMarkProvider::ShouldMark(&jitcode_)) {
+    if (ShouldMarkProvider::ShouldMark(trc->runtime(), &jitcode_)) {
         TraceManuallyBarrieredEdge(trc, &jitcode_, "jitcodglobaltable-baseentry-jitcode");
         return true;
     }
@@ -867,10 +844,10 @@ JitcodeGlobalEntry::BaseEntry::markJitcode(JSTracer* trc)
 }
 
 bool
-JitcodeGlobalEntry::BaseEntry::isJitcodeMarkedFromAnyThread()
+JitcodeGlobalEntry::BaseEntry::isJitcodeMarkedFromAnyThread(JSRuntime* rt)
 {
-    return IsMarkedUnbarriered(&jitcode_) ||
-           jitcode_->arenaHeader()->allocatedDuringIncremental;
+    return IsMarkedUnbarriered(rt, &jitcode_) ||
+           jitcode_->arena()->allocatedDuringIncremental;
 }
 
 bool
@@ -883,7 +860,7 @@ template <class ShouldMarkProvider>
 bool
 JitcodeGlobalEntry::BaselineEntry::mark(JSTracer* trc)
 {
-    if (ShouldMarkProvider::ShouldMark(&script_)) {
+    if (ShouldMarkProvider::ShouldMark(trc->runtime(), &script_)) {
         TraceManuallyBarrieredEdge(trc, &script_, "jitcodeglobaltable-baselineentry-script");
         return true;
     }
@@ -897,10 +874,10 @@ JitcodeGlobalEntry::BaselineEntry::sweepChildren()
 }
 
 bool
-JitcodeGlobalEntry::BaselineEntry::isMarkedFromAnyThread()
+JitcodeGlobalEntry::BaselineEntry::isMarkedFromAnyThread(JSRuntime* rt)
 {
-    return IsMarkedUnbarriered(&script_) ||
-           script_->arenaHeader()->allocatedDuringIncremental;
+    return IsMarkedUnbarriered(rt, &script_) ||
+           script_->arena()->allocatedDuringIncremental;
 }
 
 template <class ShouldMarkProvider>
@@ -909,8 +886,9 @@ JitcodeGlobalEntry::IonEntry::mark(JSTracer* trc)
 {
     bool markedAny = false;
 
+    JSRuntime* rt = trc->runtime();
     for (unsigned i = 0; i < numScripts(); i++) {
-        if (ShouldMarkProvider::ShouldMark(&sizedScriptList()->pairs[i].script)) {
+        if (ShouldMarkProvider::ShouldMark(rt, &sizedScriptList()->pairs[i].script)) {
             TraceManuallyBarrieredEdge(trc, &sizedScriptList()->pairs[i].script,
                                        "jitcodeglobaltable-ionentry-script");
             markedAny = true;
@@ -923,15 +901,15 @@ JitcodeGlobalEntry::IonEntry::mark(JSTracer* trc)
     for (IonTrackedTypeWithAddendum* iter = optsAllTypes_->begin();
          iter != optsAllTypes_->end(); iter++)
     {
-        if (ShouldMarkProvider::ShouldMark(&iter->type)) {
-            TypeSet::MarkTypeUnbarriered(trc, &iter->type, "jitcodeglobaltable-ionentry-type");
+        if (ShouldMarkProvider::ShouldMark(rt, &iter->type)) {
+            iter->type.trace(trc);
             markedAny = true;
         }
-        if (iter->hasAllocationSite() && ShouldMarkProvider::ShouldMark(&iter->script)) {
+        if (iter->hasAllocationSite() && ShouldMarkProvider::ShouldMark(rt, &iter->script)) {
             TraceManuallyBarrieredEdge(trc, &iter->script,
                                        "jitcodeglobaltable-ionentry-type-addendum-script");
             markedAny = true;
-        } else if (iter->hasConstructor() && ShouldMarkProvider::ShouldMark(&iter->constructor)) {
+        } else if (iter->hasConstructor() && ShouldMarkProvider::ShouldMark(rt, &iter->constructor)) {
             TraceManuallyBarrieredEdge(trc, &iter->constructor,
                                        "jitcodeglobaltable-ionentry-type-addendum-constructor");
             markedAny = true;
@@ -964,11 +942,11 @@ JitcodeGlobalEntry::IonEntry::sweepChildren()
 }
 
 bool
-JitcodeGlobalEntry::IonEntry::isMarkedFromAnyThread()
+JitcodeGlobalEntry::IonEntry::isMarkedFromAnyThread(JSRuntime* rt)
 {
     for (unsigned i = 0; i < numScripts(); i++) {
-        if (!IsMarkedUnbarriered(&sizedScriptList()->pairs[i].script) &&
-            !sizedScriptList()->pairs[i].script->arenaHeader()->allocatedDuringIncremental)
+        if (!IsMarkedUnbarriered(rt, &sizedScriptList()->pairs[i].script) &&
+            !sizedScriptList()->pairs[i].script->arena()->allocatedDuringIncremental)
         {
             return false;
         }
@@ -980,7 +958,7 @@ JitcodeGlobalEntry::IonEntry::isMarkedFromAnyThread()
     for (IonTrackedTypeWithAddendum* iter = optsAllTypes_->begin();
          iter != optsAllTypes_->end(); iter++)
     {
-        if (!TypeSet::IsTypeMarked(&iter->type) &&
+        if (!TypeSet::IsTypeMarked(rt, &iter->type) &&
             !TypeSet::IsTypeAllocatedDuringIncremental(iter->type))
         {
             return false;
@@ -994,24 +972,21 @@ template <class ShouldMarkProvider>
 bool
 JitcodeGlobalEntry::IonCacheEntry::mark(JSTracer* trc)
 {
-    JitcodeGlobalEntry entry;
-    RejoinEntry(trc->runtime(), *this, nativeStartAddr(), &entry);
+    JitcodeGlobalEntry& entry = RejoinEntry(trc->runtime(), *this, nativeStartAddr());
     return entry.mark<ShouldMarkProvider>(trc);
 }
 
 void
 JitcodeGlobalEntry::IonCacheEntry::sweepChildren(JSRuntime* rt)
 {
-    JitcodeGlobalEntry entry;
-    RejoinEntry(rt, *this, nativeStartAddr(), &entry);
+    JitcodeGlobalEntry& entry = RejoinEntry(rt, *this, nativeStartAddr());
     entry.sweepChildren(rt);
 }
 
 bool
 JitcodeGlobalEntry::IonCacheEntry::isMarkedFromAnyThread(JSRuntime* rt)
 {
-    JitcodeGlobalEntry entry;
-    RejoinEntry(rt, *this, nativeStartAddr(), &entry);
+    JitcodeGlobalEntry& entry = RejoinEntry(rt, *this, nativeStartAddr());
     return entry.isMarkedFromAnyThread(rt);
 }
 
@@ -1023,8 +998,7 @@ JitcodeGlobalEntry::IonCacheEntry::trackedOptimizationIndexAtAddr(
 {
     MOZ_ASSERT(hasTrackedOptimizations());
     MOZ_ASSERT(containsPointer(ptr));
-    JitcodeGlobalEntry entry;
-    RejoinEntry(rt, *this, ptr, &entry);
+    JitcodeGlobalEntry& entry = RejoinEntry(rt, *this, ptr);
 
     if (!entry.hasTrackedOptimizations())
         return mozilla::Nothing();
@@ -1044,8 +1018,7 @@ void
 JitcodeGlobalEntry::IonCacheEntry::forEachOptimizationAttempt(
         JSRuntime *rt, uint8_t index, JS::ForEachTrackedOptimizationAttemptOp& op)
 {
-    JitcodeGlobalEntry entry;
-    RejoinEntry(rt, *this, nativeStartAddr(), &entry);
+    JitcodeGlobalEntry& entry =  RejoinEntry(rt, *this, nativeStartAddr());
     if (!entry.hasTrackedOptimizations())
         return;
     entry.forEachOptimizationAttempt(rt, index, op);
@@ -1059,8 +1032,7 @@ JitcodeGlobalEntry::IonCacheEntry::forEachOptimizationTypeInfo(
         JSRuntime *rt, uint8_t index,
         IonTrackedOptimizationsTypeInfo::ForEachOpAdapter& op)
 {
-    JitcodeGlobalEntry entry;
-    RejoinEntry(rt, *this, nativeStartAddr(), &entry);
+    JitcodeGlobalEntry& entry = RejoinEntry(rt, *this, nativeStartAddr());
     if (!entry.hasTrackedOptimizations())
         return;
     entry.forEachOptimizationTypeInfo(rt, index, op);
@@ -1674,18 +1646,17 @@ JS::ForEachProfiledFrameOp::FrameHandle::frameKind() const
 }
 
 JS_PUBLIC_API(void)
-JS::ForEachProfiledFrame(JSRuntime* rt, void* addr, ForEachProfiledFrameOp& op)
+JS::ForEachProfiledFrame(JSContext* cx, void* addr, ForEachProfiledFrameOp& op)
 {
-    js::jit::JitcodeGlobalTable* table = rt->jitRuntime()->getJitcodeGlobalTable();
-    js::jit::JitcodeGlobalEntry entry;
-    table->lookupInfallible(addr, &entry, rt);
+    js::jit::JitcodeGlobalTable* table = cx->jitRuntime()->getJitcodeGlobalTable();
+    js::jit::JitcodeGlobalEntry& entry = table->lookupInfallible(addr);
 
     // Extract the stack for the entry.  Assume maximum inlining depth is <64
     const char* labels[64];
-    uint32_t depth = entry.callStackAtAddr(rt, addr, labels, 64);
+    uint32_t depth = entry.callStackAtAddr(cx, addr, labels, 64);
     MOZ_ASSERT(depth < 64);
     for (uint32_t i = depth; i != 0; i--) {
-        JS::ForEachProfiledFrameOp::FrameHandle handle(rt, entry, addr, labels[i - 1], i - 1);
+        JS::ForEachProfiledFrameOp::FrameHandle handle(cx, entry, addr, labels[i - 1], i - 1);
         op(handle);
     }
 }

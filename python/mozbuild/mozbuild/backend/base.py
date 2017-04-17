@@ -194,8 +194,17 @@ class BuildBackend(LoggingMixin):
     def consume_finished(self):
         """Called when consume() has completed handling all objects."""
 
+    def build(self, config, output, jobs, verbose):
+        """Called when 'mach build' is executed.
+
+        This should return the status value of a subprocess, where 0 denotes
+        success and any other value is an error code. A return value of None
+        indicates that the default 'make -f client.mk' should run.
+        """
+        return None
+
     @contextmanager
-    def _write_file(self, path=None, fh=None):
+    def _write_file(self, path=None, fh=None, mode='rU'):
         """Context manager to write a file.
 
         This is a glorified wrapper around FileAvoidWrite with integration to
@@ -209,7 +218,8 @@ class BuildBackend(LoggingMixin):
 
         if path is not None:
             assert fh is None
-            fh = FileAvoidWrite(path, capture_diff=True, dry_run=self.dry_run)
+            fh = FileAvoidWrite(path, capture_diff=True, dry_run=self.dry_run,
+                                mode=mode)
         else:
             assert fh is not None
 
@@ -240,7 +250,10 @@ class BuildBackend(LoggingMixin):
         in the current environment.'''
         pp = Preprocessor()
         srcdir = mozpath.dirname(obj.input_path)
-        pp.context.update(obj.config.substs)
+        pp.context.update({
+            k: ' '.join(v) if isinstance(v, list) else v
+            for k, v in obj.config.substs.iteritems()
+        })
         pp.context.update(
             top_srcdir=obj.topsrcdir,
             topobjdir=obj.topobjdir,

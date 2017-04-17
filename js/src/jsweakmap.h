@@ -95,7 +95,7 @@ class WeakMapBase : public mozilla::LinkedListElement<WeakMapBase>
 
   protected:
     // Object that this weak map is part of, if any.
-    HeapPtrObject memberOf;
+    GCPtrObject memberOf;
 
     // Zone containing this weak map.
     JS::Zone* zone;
@@ -136,7 +136,8 @@ class WeakMap : public HashMap<Key, Value, HashPolicy, RuntimeAllocPolicy>,
         if (!Base::init(len))
             return false;
         zone->gcWeakMapList.insertFront(this);
-        marked = JS::IsIncrementalGCInProgress(zone->runtimeFromMainThread());
+        JSRuntime* rt = zone->runtimeFromMainThread();
+        marked = JS::IsIncrementalGCInProgress(rt->contextFromMainThread());
         return true;
     }
 
@@ -178,13 +179,15 @@ class WeakMap : public HashMap<Key, Value, HashPolicy, RuntimeAllocPolicy>,
     {
         MOZ_ASSERT(marked);
 
-        gc::Cell* l = origKey.asCell();
-        Ptr p = Base::lookup(reinterpret_cast<Lookup&>(l));
+        // If this cast fails, then you're instantiating the WeakMap with a
+        // Lookup that can't be constructed from a Cell*. The WeakKeyTable
+        // mechanism is indexed with a GCCellPtr, so that won't work.
+        Ptr p = Base::lookup(static_cast<Lookup>(origKey.asCell()));
         MOZ_ASSERT(p.found());
 
         Key key(p->key());
         MOZ_ASSERT((markedCell == extractUnbarriered(key)) || (markedCell == getDelegate(key)));
-        if (gc::IsMarked(&key)) {
+        if (gc::IsMarked(trc->runtime(), &key)) {
             TraceEdge(trc, &p->value(), "ephemeron value");
         } else if (keyNeedsMark(key)) {
             TraceEdge(trc, &p->value(), "WeakMap ephemeron value");
@@ -249,7 +252,7 @@ class WeakMap : public HashMap<Key, Value, HashPolicy, RuntimeAllocPolicy>,
 
         for (Enum e(*this); !e.empty(); e.popFront()) {
             // If the entry is live, ensure its key and value are marked.
-            bool keyIsMarked = gc::IsMarked(&e.front().mutableKey());
+            bool keyIsMarked = gc::IsMarked(trc->runtime(), &e.front().mutableKey());
             if (!keyIsMarked && keyNeedsMark(e.front().key())) {
                 TraceEdge(trc, &e.front().mutableKey(), "proxy-preserved WeakMap entry key");
                 keyIsMarked = true;
@@ -257,7 +260,7 @@ class WeakMap : public HashMap<Key, Value, HashPolicy, RuntimeAllocPolicy>,
             }
 
             if (keyIsMarked) {
-                if (!gc::IsMarked(&e.front().value())) {
+                if (!gc::IsMarked(trc->runtime(), &e.front().value())) {
                     TraceEdge(trc, &e.front().value(), "WeakMap entry value");
                     markedAny = true;
                 }
@@ -277,18 +280,26 @@ class WeakMap : public HashMap<Key, Value, HashPolicy, RuntimeAllocPolicy>,
         return markedAny;
     }
 
+    JSObject* getDelegate(JSObject* key) const {
+        JSWeakmapKeyDelegateOp op = key->getClass()->extWeakmapKeyDelegateOp();
+        if (!op)
+            return nullptr;
+
+        JSObject* obj = op(key);
+        if (!obj)
+            return nullptr;
+
+        MOZ_ASSERT(obj->runtimeFromMainThread() == zone->runtimeFromMainThread());
+        return obj;
+    }
+
+    JSObject* getDelegate(JSScript* script) const {
+        return nullptr;
+    }
+
   private:
     void exposeGCThingToActiveJS(const JS::Value& v) const { JS::ExposeValueToActiveJS(v); }
     void exposeGCThingToActiveJS(JSObject* obj) const { JS::ExposeObjectToActiveJS(obj); }
-
-    JSObject* getDelegate(JSObject* key) const {
-        JSWeakmapKeyDelegateOp op = key->getClass()->ext.weakmapKeyDelegateOp;
-        return op ? op(key) : nullptr;
-    }
-
-    JSObject* getDelegate(gc::Cell* cell) const {
-        return nullptr;
-    }
 
     bool keyNeedsMark(JSObject* key) const {
         JSObject* delegate = getDelegate(key);
@@ -296,10 +307,10 @@ class WeakMap : public HashMap<Key, Value, HashPolicy, RuntimeAllocPolicy>,
          * Check if the delegate is marked with any color to properly handle
          * gray marking when the key's delegate is black and the map is gray.
          */
-        return delegate && gc::IsMarkedUnbarriered(&delegate);
+        return delegate && gc::IsMarkedUnbarriered(zone->runtimeFromMainThread(), &delegate);
     }
 
-    bool keyNeedsMark(gc::Cell* cell) const {
+    bool keyNeedsMark(JSScript* script) const {
         return false;
     }
 
@@ -372,13 +383,13 @@ extern JSObject*
 InitWeakMapClass(JSContext* cx, HandleObject obj);
 
 
-class ObjectValueMap : public WeakMap<RelocatablePtrObject, RelocatableValue,
-                                      MovableCellHasher<RelocatablePtrObject>>
+class ObjectValueMap : public WeakMap<HeapPtr<JSObject*>, HeapPtr<Value>,
+                                      MovableCellHasher<HeapPtr<JSObject*>>>
 {
   public:
     ObjectValueMap(JSContext* cx, JSObject* obj)
-      : WeakMap<RelocatablePtrObject, RelocatableValue,
-                MovableCellHasher<RelocatablePtrObject>>(cx, obj)
+      : WeakMap<HeapPtr<JSObject*>, HeapPtr<Value>,
+                MovableCellHasher<HeapPtr<JSObject*>>>(cx, obj)
     {}
 
     virtual bool findZoneEdges();
@@ -410,5 +421,13 @@ class ObjectWeakMap
 };
 
 } /* namespace js */
+
+namespace JS {
+
+template <>
+struct DeletePolicy<js::ObjectValueMap> : public js::GCManagedDeletePolicy<js::ObjectValueMap>
+{};
+
+} /* namespace JS */
 
 #endif /* jsweakmap_h */

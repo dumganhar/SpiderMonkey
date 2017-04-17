@@ -5,6 +5,7 @@
 from __future__ import absolute_import, print_function, unicode_literals
 
 import argparse
+import errno
 import itertools
 import json
 import logging
@@ -35,11 +36,11 @@ from mozbuild.base import (
     ObjdirMismatchException,
 )
 
-from mozpack.manifests import (
-    InstallManifest,
+from mozbuild.backend import (
+    backends,
+    get_backend_class,
 )
-
-from mozbuild.backend import backends
+from mozbuild.shellutil import quote as shell_quote
 
 
 BUILD_WHAT_HELP = '''
@@ -229,6 +230,11 @@ class BuildOutputManager(LoggingMixin):
             # Prevents the footer from being redrawn if logging occurs.
             self._handler.footer = None
 
+        # Ensure the resource monitor is stopped because leaving it running
+        # could result in the process hanging on exit because the resource
+        # collection child process hasn't been told to stop.
+        self.monitor.stop_resource_recording()
+
     def write_line(self, line):
         if self.footer:
             self.footer.clear()
@@ -304,7 +310,10 @@ class Build(MachCommandBase):
         """
         import which
         from mozbuild.controller.building import BuildMonitor
-        from mozbuild.util import resolve_target_to_make
+        from mozbuild.util import (
+            mkdir,
+            resolve_target_to_make,
+        )
 
         self.log_manager.register_structured_logger(logging.getLogger('mozbuild'))
 
@@ -312,6 +321,10 @@ class Build(MachCommandBase):
         monitor = self._spawn(BuildMonitor)
         monitor.init(warnings_path)
         ccache_start = monitor.ccache_stats()
+
+        # Disable indexing in objdir because it is not necessary and can slow
+        # down builds.
+        mkdir(self.topobjdir, not_indexed=True)
 
         with BuildOutputManager(self.log_manager, monitor) as output:
             monitor.start()
@@ -390,9 +403,6 @@ class Build(MachCommandBase):
                     line_handler=output.on_line, log=False,
                     print_directory=False)
 
-                if self.substs.get('MOZ_ARTIFACT_BUILDS', False):
-                    self._run_mach_artifact_install()
-
                 # Build target pairs.
                 for make_dir, make_target in target_pairs:
                     # We don't display build status messages during partial
@@ -407,44 +417,40 @@ class Build(MachCommandBase):
                     if status != 0:
                         break
             else:
+                # Try to call the default backend's build() method. This will
+                # run configure to determine BUILD_BACKENDS if it hasn't run
+                # yet.
+                config = None
                 try:
-                    if self.substs.get('MOZ_ARTIFACT_BUILDS', False):
-                        self._run_mach_artifact_install()
-                except BuildEnvironmentNotFoundException:
-                    # Can't read self.substs from config.status?  That means we
-                    # need to run configure.  The client.mk invocation below
-                    # will configure, which will run config.status, which will
-                    # invoke |mach artifact install| itself before continuing
-                    # the build.  Therefore, we needn't install artifacts
-                    # ourselves.
-                    self.log(logging.DEBUG, 'artifact',
-                             {}, "Not running |mach artifact install| -- it will be run by client.mk.")
+                    config = self.config_environment
+                except Exception:
+                    config_rc = self.configure(buildstatus_messages=True,
+                                               line_handler=output.on_line)
+                    if config_rc != 0:
+                        return config_rc
 
-                status = self._run_make(srcdir=True, filename='client.mk',
-                    line_handler=output.on_line, log=False, print_directory=False,
-                    allow_parallel=False, ensure_exit_code=False, num_jobs=jobs,
-                    silent=not verbose)
+                    # Even if configure runs successfully, we may have trouble
+                    # getting the config_environment for some builds, such as
+                    # OSX Universal builds. These have to go through client.mk
+                    # regardless.
+                    try:
+                        config = self.config_environment
+                    except Exception:
+                        pass
 
-                make_extra = self.mozconfig['make_extra'] or []
-                make_extra = dict(m.split('=', 1) for m in make_extra)
+                if config:
+                    active_backend = config.substs.get('BUILD_BACKENDS', [None])[0]
+                    if active_backend:
+                        backend_cls = get_backend_class(active_backend)(config)
+                        status = backend_cls.build(self, output, jobs, verbose)
 
-                # For universal builds, we need to run the automation steps in
-                # the first architecture from MOZ_BUILD_PROJECTS
-                projects = make_extra.get('MOZ_BUILD_PROJECTS')
-                append_env = None
-                if projects:
-                    project = projects.split()[0]
-                    append_env = {b'MOZ_CURRENT_PROJECT': project.encode('utf-8')}
-                    subdir = os.path.join(self.topobjdir, project)
-                else:
-                    subdir = self.topobjdir
-                moz_automation = os.getenv('MOZ_AUTOMATION') or make_extra.get('export MOZ_AUTOMATION', None)
-                if moz_automation and status == 0:
-                    status = self._run_make(target='automation/build', directory=subdir,
+                # If the backend doesn't specify a build() method, then just
+                # call client.mk directly.
+                if status is None:
+                    status = self._run_make(srcdir=True, filename='client.mk',
                         line_handler=output.on_line, log=False, print_directory=False,
-                        ensure_exit_code=False, num_jobs=jobs, silent=not verbose,
-                        append_env=append_env
-                    )
+                        allow_parallel=False, ensure_exit_code=False, num_jobs=jobs,
+                        silent=not verbose)
 
                 self.log(logging.WARNING, 'warning_summary',
                     {'count': len(monitor.warnings_database)},
@@ -458,6 +464,7 @@ class Build(MachCommandBase):
 
         ccache_end = monitor.ccache_stats()
 
+        ccache_diff = None
         if ccache_start and ccache_end:
             ccache_diff = ccache_end - ccache_start
             if ccache_diff:
@@ -493,6 +500,34 @@ class Build(MachCommandBase):
             print('To view resource usage of the build, run |mach '
                 'resource-usage|.')
 
+            telemetry_handler = getattr(self._mach_context,
+                                        'telemetry_handler', None)
+            telemetry_data = monitor.get_resource_usage()
+
+            # Record build configuration data. For now, we cherry pick
+            # items we need rather than grabbing everything, in order
+            # to avoid accidentally disclosing PII.
+            telemetry_data['substs'] = {}
+            try:
+                for key in ['MOZ_ARTIFACT_BUILDS', 'MOZ_USING_CCACHE']:
+                    value = self.substs.get(key, False)
+                    telemetry_data['substs'][key] = value
+            except BuildEnvironmentNotFoundException:
+                pass
+
+            # Grab ccache stats if available. We need to be careful not
+            # to capture information that can potentially identify the
+            # user (such as the cache location)
+            if ccache_diff:
+                telemetry_data['ccache'] = {}
+                for key in [key[0] for key in ccache_diff.STATS_KEYS]:
+                    try:
+                        telemetry_data['ccache'][key] = ccache_diff._values[key]
+                    except KeyError:
+                        pass
+
+            telemetry_handler(self._mach_context, telemetry_data)
+
         # Only for full builds because incremental builders likely don't
         # need to be burdened with this.
         if not what:
@@ -514,13 +549,25 @@ class Build(MachCommandBase):
 
     @Command('configure', category='build',
         description='Configure the tree (run configure and config.status).')
-    def configure(self):
+    @CommandArgument('options', default=None, nargs=argparse.REMAINDER,
+                     help='Configure options')
+    def configure(self, options=None, buildstatus_messages=False, line_handler=None):
         def on_line(line):
             self.log(logging.INFO, 'build_output', {'line': line}, '{line}')
 
+        line_handler = line_handler or on_line
+
+        options = ' '.join(shell_quote(o) for o in options or ())
+        append_env = {b'CONFIGURE_ARGS': options.encode('utf-8')}
+
+        # Only print build status messages when we have an active
+        # monitor.
+        if not buildstatus_messages:
+            append_env[b'NO_BUILDSTATUS_MESSAGES'] =  b'1'
         status = self._run_make(srcdir=True, filename='client.mk',
-            target='configure', line_handler=on_line, log=False,
-            print_directory=False, allow_parallel=False, ensure_exit_code=False)
+            target='configure', line_handler=line_handler, log=False,
+            print_directory=False, allow_parallel=False, ensure_exit_code=False,
+            append_env=append_env)
 
         if not status:
             print('Configure complete!')
@@ -536,19 +583,25 @@ class Build(MachCommandBase):
         help='Port number the HTTP server should listen on.')
     @CommandArgument('--browser', default='firefox',
         help='Web browser to automatically open. See webbrowser Python module.')
-    def resource_usage(self, address=None, port=None, browser=None):
+    @CommandArgument('--url',
+        help='URL of JSON document to display')
+    def resource_usage(self, address=None, port=None, browser=None, url=None):
         import webbrowser
         from mozbuild.html_build_viewer import BuildViewerServer
 
-        last = self._get_state_filename('build_resources.json')
-        if not os.path.exists(last):
-            print('Build resources not available. If you have performed a '
-                'build and receive this message, the psutil Python package '
-                'likely failed to initialize properly.')
-            return 1
-
         server = BuildViewerServer(address, port)
-        server.add_resource_json_file('last', last)
+
+        if url:
+            server.add_resource_json_url('url', url)
+        else:
+            last = self._get_state_filename('build_resources.json')
+            if not os.path.exists(last):
+                print('Build resources not available. If you have performed a '
+                    'build and receive this message, the psutil Python package '
+                    'likely failed to initialize properly.')
+                return 1
+
+            server.add_resource_json_file('last', last)
         try:
             webbrowser.get(browser).open_new_tab(server.url)
         except Exception:
@@ -560,41 +613,6 @@ class Build(MachCommandBase):
 
         print('Hit CTRL+c to stop server.')
         server.run()
-
-    CLOBBER_CHOICES = ['objdir', 'python']
-    @Command('clobber', category='build',
-        description='Clobber the tree (delete the object directory).')
-    @CommandArgument('what', default=['objdir'], nargs='*',
-        help='Target to clobber, must be one of {{{}}} (default objdir).'.format(
-             ', '.join(CLOBBER_CHOICES)))
-    def clobber(self, what):
-        invalid = set(what) - set(self.CLOBBER_CHOICES)
-        if invalid:
-            print('Unknown clobber target(s): {}'.format(', '.join(invalid)))
-            return 1
-
-        ret = 0
-        if 'objdir' in what:
-            try:
-                self.remove_objdir()
-            except OSError as e:
-                if sys.platform.startswith('win'):
-                    if isinstance(e, WindowsError) and e.winerror in (5,32):
-                        self.log(logging.ERROR, 'file_access_error', {'error': e},
-                            "Could not clobber because a file was in use. If the "
-                            "application is running, try closing it. {error}")
-                        return 1
-                raise
-
-        if 'python' in what:
-            if os.path.isdir(mozpath.join(self.topsrcdir, '.hg')):
-                cmd = ['hg', 'purge', '--all', '-I', 'glob:**.py[co]']
-            elif os.path.isdir(mozpath.join(self.topsrcdir, '.git')):
-                cmd = ['git', 'clean', '-f', '-x', '*.py[co]']
-            else:
-                cmd = ['find', '.', '-type', 'f', '-name', '*.py[co]', '-delete']
-            ret = subprocess.call(cmd, cwd=self.topsrcdir)
-        return ret
 
     @Command('build-backend', category='build',
         description='Generate a backend used to build the tree.')
@@ -632,18 +650,6 @@ class Build(MachCommandBase):
         return self._run_command_in_objdir(args=args, pass_thru=True,
             ensure_exit_code=False)
 
-    def _run_mach_artifact_install(self):
-        # We'd like to launch artifact using
-        # self._mach_context.commands.dispatch.  However, artifact activates
-        # the virtualenv, which plays badly with the rest of this code.
-        # Therefore, we run |mach artifact install| in a new process (and
-        # throw an exception if it fails).
-        self.log(logging.INFO, 'artifact',
-                 {}, "Running |mach artifact install|.")
-        args = [os.path.join(self.topsrcdir, 'mach'), 'artifact', 'install']
-        self._run_command_in_srcdir(args=args, require_unix_environment=True,
-            pass_thru=True, ensure_exit_code=True)
-
 @CommandProvider
 class Doctor(MachCommandBase):
     """Provide commands for diagnosing common build environment problems"""
@@ -656,6 +662,47 @@ class Doctor(MachCommandBase):
         from mozbuild.doctor import Doctor
         doctor = Doctor(self.topsrcdir, self.topobjdir, fix)
         return doctor.check_all()
+
+@CommandProvider
+class Clobber(MachCommandBase):
+    NO_AUTO_LOG = True
+    CLOBBER_CHOICES = ['objdir', 'python']
+    @Command('clobber', category='build',
+        description='Clobber the tree (delete the object directory).')
+    @CommandArgument('what', default=['objdir'], nargs='*',
+        help='Target to clobber, must be one of {{{}}} (default objdir).'.format(
+             ', '.join(CLOBBER_CHOICES)))
+    @CommandArgument('--full', action='store_true',
+        help='Perform a full clobber')
+    def clobber(self, what, full=False):
+        invalid = set(what) - set(self.CLOBBER_CHOICES)
+        if invalid:
+            print('Unknown clobber target(s): {}'.format(', '.join(invalid)))
+            return 1
+
+        ret = 0
+        if 'objdir' in what:
+            from mozbuild.controller.clobber import Clobberer
+            try:
+                Clobberer(self.topsrcdir, self.topobjdir).remove_objdir(full)
+            except OSError as e:
+                if sys.platform.startswith('win'):
+                    if isinstance(e, WindowsError) and e.winerror in (5,32):
+                        self.log(logging.ERROR, 'file_access_error', {'error': e},
+                            "Could not clobber because a file was in use. If the "
+                            "application is running, try closing it. {error}")
+                        return 1
+                raise
+
+        if 'python' in what:
+            if os.path.isdir(mozpath.join(self.topsrcdir, '.hg')):
+                cmd = ['hg', 'purge', '--all', '-I', 'glob:**.py[co]']
+            elif os.path.isdir(mozpath.join(self.topsrcdir, '.git')):
+                cmd = ['git', 'clean', '-f', '-x', '*.py[co]']
+            else:
+                cmd = ['find', '.', '-type', 'f', '-name', '*.py[co]', '-delete']
+            ret = subprocess.call(cmd, cwd=self.topsrcdir)
+        return ret
 
 @CommandProvider
 class Logs(MachCommandBase):
@@ -672,12 +719,12 @@ class Logs(MachCommandBase):
             path = self._get_state_filename('last_log.json')
             log_file = open(path, 'rb')
 
-        if self.log_manager.terminal:
+        if os.isatty(sys.stdout.fileno()):
             env = dict(os.environ)
             if 'LESS' not in env:
                 # Sensible default flags if none have been set in the user
                 # environment.
-                env['LESS'] = 'FRX'
+                env[b'LESS'] = b'FRX'
             less = subprocess.Popen(['less'], stdin=subprocess.PIPE, env=env)
             # Various objects already have a reference to sys.stdout, so we
             # can't just change it, we need to change the file descriptor under
@@ -866,7 +913,10 @@ class GTestCommands(MachCommandBase):
         # https://code.google.com/p/googletest/wiki/AdvancedGuide#Running_Test_Programs:_Advanced_Options
         gtest_env = {b'GTEST_FILTER': gtest_filter}
 
-        xre_path = os.path.join(self.topobjdir, "dist", "bin")
+        # Note: we must normalize the path here so that gtest on Windows sees
+        # a MOZ_GMP_PATH which has only Windows dir seperators, because
+        # nsILocalFile cannot open the paths with non-Windows dir seperators.
+        xre_path = os.path.join(os.path.normpath(self.topobjdir), "dist", "bin")
         gtest_env["MOZ_XRE_DIR"] = xre_path
         gtest_env["MOZ_GMP_PATH"] = os.pathsep.join(
             os.path.join(xre_path, p, "1.0")
@@ -1031,10 +1081,12 @@ class Install(MachCommandBase):
 
     @Command('install', category='post-build',
         description='Install the package on the machine, or on a device.')
-    def install(self):
+    @CommandArgument('--verbose', '-v', action='store_true',
+        help='Print verbose output when installing to an Android emulator.')
+    def install(self, verbose=False):
         if conditions.is_android(self):
             from mozrunner.devices.android_device import verify_android_device
-            verify_android_device(self)
+            verify_android_device(self, verbose=verbose)
         ret = self._run_make(directory=".", target='install', ensure_exit_code=False)
         if ret == 0:
             self.notify('Install complete')
@@ -1057,6 +1109,8 @@ class RunProgram(MachCommandBase):
         help='Do not pass the --foreground argument by default on Mac.')
     @CommandArgument('--noprofile', '-n', action='store_true', group=prog_group,
         help='Do not pass the --profile argument by default.')
+    @CommandArgument('--disable-e10s', action='store_true', group=prog_group,
+        help='Run the program with electrolysis disabled.')
 
     @CommandArgumentGroup('debugging')
     @CommandArgument('--debug', action='store_true', group='debugging',
@@ -1079,15 +1133,12 @@ class RunProgram(MachCommandBase):
         help='Enable DMD. The following arguments have no effect without this.')
     @CommandArgument('--mode', choices=['live', 'dark-matter', 'cumulative', 'scan'], group='DMD',
          help='Profiling mode. The default is \'dark-matter\'.')
-    @CommandArgument('--sample-below', default=None, type=str, group='DMD',
-        help='Sample blocks smaller than this. Use 1 for no sampling. The default is 4093.')
-    @CommandArgument('--max-frames', default=None, type=str, group='DMD',
-        help='The maximum depth of stack traces. The default and maximum is 24.')
+    @CommandArgument('--stacks', choices=['partial', 'full'], group='DMD',
+        help='Allocation stack trace coverage. The default is \'partial\'.')
     @CommandArgument('--show-dump-stats', action='store_true', group='DMD',
         help='Show stats when doing dumps.')
-    def run(self, params, remote, background, noprofile, debug, debugger,
-        debugparams, slowscript, dmd, mode, sample_below, max_frames,
-        show_dump_stats):
+    def run(self, params, remote, background, noprofile, disable_e10s, debug,
+        debugger, debugparams, slowscript, dmd, mode, stacks, show_dump_stats):
 
         if conditions.is_android(self):
             # Running Firefox for Android is completely different
@@ -1132,8 +1183,13 @@ class RunProgram(MachCommandBase):
                 args.append(path)
 
         extra_env = {'MOZ_CRASHREPORTER_DISABLE': '1'}
+        if disable_e10s:
+            extra_env['MOZ_FORCE_DISABLE_E10S'] = '1'
 
         if debug or debugger or debugparams:
+            if 'INSIDE_EMACS' in os.environ:
+                self.log_manager.terminal_handler.setLevel(logging.WARNING)
+
             import mozdebug
             if not debugger:
                 # No debugger name was provided. Look for the default ones on
@@ -1168,10 +1224,8 @@ class RunProgram(MachCommandBase):
 
             if mode:
                 dmd_params.append('--mode=' + mode)
-            if sample_below:
-                dmd_params.append('--sample-below=' + sample_below)
-            if max_frames:
-                dmd_params.append('--max-frames=' + max_frames)
+            if stacks:
+                dmd_params.append('--stacks=' + stacks)
             if show_dump_stats:
                 dmd_params.append('--show-dump-stats=yes')
 
@@ -1359,31 +1413,6 @@ class MachDebug(MachCommandBase):
             print('FOUND_MOZCONFIG=%s' % mozpath.normsep(self.mozconfig['path']),
                 file=out)
 
-    def _environment_configure(self, out, verbose):
-        if self.mozconfig['path']:
-            # Replace ' with '"'"', so that shell quoting e.g.
-            # a'b becomes 'a'"'"'b'.
-            quote = lambda s: s.replace("'", """'"'"'""")
-            if self.mozconfig['configure_args'] and \
-                    'COMM_BUILD' not in os.environ:
-                print('echo Adding configure options from %s' %
-                    mozpath.normsep(self.mozconfig['path']), file=out)
-                for arg in self.mozconfig['configure_args']:
-                    quoted_arg = quote(arg)
-                    print("echo '  %s'" % quoted_arg, file=out)
-                    print("""set -- "$@" '%s'""" % quoted_arg, file=out)
-            for key, value in self.mozconfig['env']['added'].items():
-                print("export %s='%s'" % (key, quote(value)), file=out)
-            for key, (old, value) in self.mozconfig['env']['modified'].items():
-                print("export %s='%s'" % (key, quote(value)), file=out)
-            for key, value in self.mozconfig['vars']['added'].items():
-                print("%s='%s'" % (key, quote(value)), file=out)
-            for key, (old, value) in self.mozconfig['vars']['modified'].items():
-                print("%s='%s'" % (key, quote(value)), file=out)
-            for key in self.mozconfig['env']['removed'].keys() + \
-                    self.mozconfig['vars']['removed'].keys():
-                print("unset %s" % key, file=out)
-
     def _environment_json(self, out, verbose):
         import json
         class EnvironmentEncoder(json.JSONEncoder):
@@ -1407,7 +1436,7 @@ class ArtifactSubCommand(SubCommand):
     def __call__(self, func):
         after = SubCommand.__call__(self, func)
         jobchoices = {
-            'android-api-11',
+            'android-api-15',
             'android-x86',
             'linux',
             'linux64',
@@ -1433,10 +1462,7 @@ class PackageFrontend(MachCommandBase):
     """Fetch and install binary artifacts from Mozilla automation."""
 
     @Command('artifact', category='post-build',
-        description='Use pre-built artifacts to build Firefox.',
-        conditions=[
-            conditions.is_hg,  # mercurial only for now.
-        ])
+        description='Use pre-built artifacts to build Firefox.')
     def artifact(self):
         '''Download, cache, and install pre-built binary artifacts to build Firefox.
 
@@ -1454,44 +1480,67 @@ class PackageFrontend(MachCommandBase):
     def _set_log_level(self, verbose):
         self.log_manager.terminal_handler.setLevel(logging.INFO if not verbose else logging.DEBUG)
 
-    def _make_artifacts(self, tree=None, job=None):
+    def _install_pip_package(self, package):
+        if os.environ.get('MOZ_AUTOMATION'):
+            self.virtualenv_manager._run_pip([
+                'install',
+                package,
+                '--no-index',
+                '--find-links',
+                'http://pypi.pub.build.mozilla.org/pub',
+                '--trusted-host',
+                'pypi.pub.build.mozilla.org',
+            ])
+            return
+        self.virtualenv_manager.install_pip_package(package)
+
+    def _make_artifacts(self, tree=None, job=None, skip_cache=False):
+        # Undo PATH munging that will be done by activating the virtualenv,
+        # so that invoked subprocesses expecting to find system python
+        # (git cinnabar, in particular), will not find virtualenv python.
+        original_path = os.environ.get('PATH', '')
         self._activate_virtualenv()
-        self.virtualenv_manager.install_pip_package('pylru==1.0.9')
-        self.virtualenv_manager.install_pip_package('taskcluster==0.0.32')
-        self.virtualenv_manager.install_pip_package('mozregression==1.0.2')
+        os.environ['PATH'] = original_path
+
+        for package in ('taskcluster==0.0.32',
+                        'mozregression==1.0.2'):
+            self._install_pip_package(package)
 
         state_dir = self._mach_context.state_dir
         cache_dir = os.path.join(state_dir, 'package-frontend')
 
+        try:
+            os.makedirs(cache_dir)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise
+
         import which
-        if self._is_windows():
-          hg = which.which('hg.exe')
-        else:
-          hg = which.which('hg')
+
+        here = os.path.abspath(os.path.dirname(__file__))
+        build_obj = MozbuildObject.from_environment(cwd=here)
+
+        hg = None
+        if conditions.is_hg(build_obj):
+            if self._is_windows():
+                hg = which.which('hg.exe')
+            else:
+                hg = which.which('hg')
+
+        git = None
+        if conditions.is_git(build_obj):
+            if self._is_windows():
+                git = which.which('git.exe')
+            else:
+                git = which.which('git')
 
         # Absolutely must come after the virtualenv is populated!
         from mozbuild.artifacts import Artifacts
-        artifacts = Artifacts(tree, job, log=self.log, cache_dir=cache_dir, hg=hg)
+        artifacts = Artifacts(tree, self.substs, self.defines, job,
+                              log=self.log, cache_dir=cache_dir,
+                              skip_cache=skip_cache, hg=hg, git=git,
+                              topsrcdir=self.topsrcdir)
         return artifacts
-
-    def _compute_defaults(self, tree=None, job=None):
-        # Firefox front-end developers mostly use fx-team.  Post auto-land, make this central.
-        tree = tree or 'fx-team'
-        if job:
-            return (tree, job)
-        if self.substs.get('MOZ_BUILD_APP', '') == 'mobile/android':
-            if self.substs['ANDROID_CPU_ARCH'] == 'x86':
-                return tree, 'android-x86'
-            return tree, 'android-api-11'
-        # TODO: check for 32/64 bit builds.  We'd like to use HAVE_64BIT_BUILD
-        # but that relies on the compile environment.
-        if self.defines.get('XP_LINUX', False):
-            return tree, 'linux64'
-        if self.defines.get('XP_MACOSX', False):
-            return tree, 'macosx64'
-        if self.defines.get('XP_WIN', False):
-            return tree, 'win32'
-        raise Exception('Cannot determine default tree and job for |mach artifact|!')
 
     @ArtifactSubCommand('artifact', 'install',
         'Install a good pre-built artifact.')
@@ -1500,35 +1549,19 @@ class PackageFrontend(MachCommandBase):
             'which case the current hg repository is inspected; an hg revision; '
             'a remote URL; or a local file.',
         default=None)
-    def artifact_install(self, source=None, tree=None, job=None, verbose=False):
+    @CommandArgument('--skip-cache', action='store_true',
+        help='Skip all local caches to force re-fetching remote artifacts.',
+        default=False)
+    def artifact_install(self, source=None, skip_cache=False, tree=None, job=None, verbose=False):
         self._set_log_level(verbose)
-        tree, job = self._compute_defaults(tree, job)
-        artifacts = self._make_artifacts(tree=tree, job=job)
+        artifacts = self._make_artifacts(tree=tree, job=job, skip_cache=skip_cache)
 
-        manifest_path = mozpath.join(self.topobjdir, '_build_manifests', 'install', 'dist_bin')
-        manifest = InstallManifest(manifest_path)
-
-        def install_callback(path, file_existed, file_updated):
-            # Our paths are either under dist/bin or dist/plugins (for test
-            # plugins). dist/plugins. does not have an install manifest.
-            if not path.startswith('bin/'):
-                return
-            path = path[len('bin/'):]
-            if path not in manifest:
-                manifest.add_optional_exists(path)
-
-        retcode = artifacts.install_from(source, self.distdir, install_callback=install_callback)
-
-        if retcode == 0:
-            manifest.write(manifest_path)
-
-        return retcode
+        return artifacts.install_from(source, self.distdir)
 
     @ArtifactSubCommand('artifact', 'last',
         'Print the last pre-built artifact installed.')
     def artifact_print_last(self, tree=None, job=None, verbose=False):
         self._set_log_level(verbose)
-        tree, job = self._compute_defaults(tree, job)
         artifacts = self._make_artifacts(tree=tree, job=job)
         artifacts.print_last()
         return 0
@@ -1537,7 +1570,6 @@ class PackageFrontend(MachCommandBase):
         'Print local artifact cache for debugging.')
     def artifact_print_cache(self, tree=None, job=None, verbose=False):
         self._set_log_level(verbose)
-        tree, job = self._compute_defaults(tree, job)
         artifacts = self._make_artifacts(tree=tree, job=job)
         artifacts.print_cache()
         return 0
@@ -1546,7 +1578,26 @@ class PackageFrontend(MachCommandBase):
         'Delete local artifacts and reset local artifact cache.')
     def artifact_clear_cache(self, tree=None, job=None, verbose=False):
         self._set_log_level(verbose)
-        tree, job = self._compute_defaults(tree, job)
         artifacts = self._make_artifacts(tree=tree, job=job)
         artifacts.clear_cache()
         return 0
+
+@CommandProvider
+class Vendor(MachCommandBase):
+    """Vendor third-party dependencies into the source repository."""
+
+    @Command('vendor', category='misc',
+             description='Vendor third-party dependencies into the source repository.')
+    def vendor(self):
+        self.parser.print_usage()
+        sys.exit(1)
+
+    @SubCommand('vendor', 'rust',
+                description='Vendor rust crates from crates.io into third_party/rust')
+    @CommandArgument('--ignore-modified', action='store_true',
+        help='Ignore modified files in current checkout',
+        default=False)
+    def vendor_rust(self, **kwargs):
+        from mozbuild.vendor_rust import VendorRust
+        vendor_command = self._spawn(VendorRust)
+        vendor_command.vendor(**kwargs)

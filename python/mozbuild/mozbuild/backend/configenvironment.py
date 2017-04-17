@@ -8,7 +8,7 @@ import os
 import sys
 
 from collections import Iterable
-from types import StringTypes
+from types import StringTypes, ModuleType
 
 import mozpack.path as mozpath
 
@@ -34,6 +34,7 @@ class BuildConfig(object):
         self.non_global_defines = []
         self.substs = {}
         self.files = []
+        self.mozconfig = None
 
     @classmethod
     def from_config_status(cls, path):
@@ -44,6 +45,12 @@ class BuildConfig(object):
         # cache the compiled code as it can be reused
         # we cache it the first time, or if the file changed
         if not path in code_cache or code_cache[path][0] != mtime:
+            # Add config.status manually to sys.modules so it gets picked up by
+            # iter_modules_in_path() for automatic dependencies.
+            mod = ModuleType('config.status')
+            mod.__file__ = path
+            sys.modules['config.status'] = mod
+
             with open(path, 'rt') as fh:
                 source = fh.read()
                 code_cache[path] = (
@@ -78,12 +85,11 @@ class ConfigEnvironment(object):
     Creating a ConfigEnvironment requires a few arguments:
       - topsrcdir and topobjdir are, respectively, the top source and
         the top object directory.
-      - defines is a list of (name, value) tuples. In autoconf, these are
-        set with AC_DEFINE and AC_DEFINE_UNQUOTED
+      - defines is a dict filled from AC_DEFINE and AC_DEFINE_UNQUOTED in
+        autoconf.
       - non_global_defines are a list of names appearing in defines above
         that are not meant to be exported in ACDEFINES (see below)
-      - substs is a list of (name, value) tuples. In autoconf, these are
-        set with AC_SUBST.
+      - substs is a dict filled from AC_SUBST in autoconf.
 
     ConfigEnvironment automatically defines one additional substs variable
     from all the defines not appearing in non_global_defines:
@@ -106,17 +112,18 @@ class ConfigEnvironment(object):
     path or a path relative to the topobjdir.
     """
 
-    def __init__(self, topsrcdir, topobjdir, defines=[], non_global_defines=[],
-        substs=[], source=None):
+    def __init__(self, topsrcdir, topobjdir, defines=None,
+        non_global_defines=None, substs=None, source=None, mozconfig=None):
 
         if not source:
             source = mozpath.join(topobjdir, 'config.status')
         self.source = source
-        self.defines = ReadOnlyDict(defines)
-        self.non_global_defines = non_global_defines
-        self.substs = dict(substs)
+        self.defines = ReadOnlyDict(defines or {})
+        self.non_global_defines = non_global_defines or []
+        self.substs = dict(substs or {})
         self.topsrcdir = mozpath.abspath(topsrcdir)
         self.topobjdir = mozpath.abspath(topobjdir)
+        self.mozconfig = mozpath.abspath(mozconfig) if mozconfig else None
         self.lib_prefix = self.substs.get('LIB_PREFIX', '')
         if 'LIB_SUFFIX' in self.substs:
             self.lib_suffix = '.%s' % self.substs['LIB_SUFFIX']
@@ -129,10 +136,11 @@ class ConfigEnvironment(object):
             self.import_prefix = self.dll_prefix
             self.import_suffix = self.dll_suffix
 
-        global_defines = [name for name, value in defines
-            if not name in non_global_defines]
+        global_defines = [name for name in self.defines
+            if not name in self.non_global_defines]
         self.substs['ACDEFINES'] = ' '.join(['-D%s=%s' % (name,
-            shell_quote(self.defines[name]).replace('$', '$$')) for name in global_defines])
+            shell_quote(self.defines[name]).replace('$', '$$'))
+            for name in sorted(global_defines)])
         def serialize(obj):
             if isinstance(obj, StringTypes):
                 return obj
@@ -178,6 +186,10 @@ class ConfigEnvironment(object):
             self.substs_unicode[k] = v
 
         self.substs_unicode = ReadOnlyDict(self.substs_unicode)
+
+    @property
+    def is_artifact_build(self):
+        return self.substs.get('MOZ_ARTIFACT_BUILDS', False)
 
     @staticmethod
     def from_config_status(path):

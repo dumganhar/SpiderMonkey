@@ -9,7 +9,6 @@
 
 #include "jsopcode.h"
 
-#include "jit/AtomicOp.h"
 #include "jit/IonCaches.h"
 #include "jit/JitFrames.h"
 #include "jit/mips-shared/MacroAssembler-mips-shared.h"
@@ -64,6 +63,9 @@ class MacroAssemblerMIPS64 : public MacroAssemblerMIPSShared
     void ma_liPatchable(Register dest, ImmPtr imm);
     void ma_liPatchable(Register dest, ImmWord imm, LiFlags flags = Li48);
 
+    // Negate
+    void ma_dnegu(Register rd, Register rs);
+
     // Shift operations
     void ma_dsll(Register rd, Register rt, Imm32 shift);
     void ma_dsrl(Register rd, Register rt, Imm32 shift);
@@ -80,6 +82,8 @@ class MacroAssemblerMIPS64 : public MacroAssemblerMIPSShared
     void ma_dins(Register rt, Register rs, Imm32 pos, Imm32 size);
     void ma_dext(Register rt, Register rs, Imm32 pos, Imm32 size);
 
+    void ma_dctz(Register rd, Register rs);
+
     // load
     void ma_load(Register dest, Address address, LoadStoreSize size = SizeWord,
                  LoadStoreExtension extension = SignExtend);
@@ -93,11 +97,14 @@ class MacroAssemblerMIPS64 : public MacroAssemblerMIPSShared
     void ma_daddu(Register rd, Register rs, Imm32 imm);
     void ma_daddu(Register rd, Register rs);
     void ma_daddu(Register rd, Imm32 imm);
-    void ma_addTestOverflow(Register rd, Register rs, Register rt, Label* overflow);
-    void ma_addTestOverflow(Register rd, Register rs, Imm32 imm, Label* overflow);
+    template <typename L>
+    void ma_addTestOverflow(Register rd, Register rs, Register rt, L overflow);
+    template <typename L>
+    void ma_addTestOverflow(Register rd, Register rs, Imm32 imm, L overflow);
 
     // subtract
     void ma_dsubu(Register rd, Register rs, Imm32 imm);
+    void ma_dsubu(Register rd, Register rs);
     void ma_dsubu(Register rd, Imm32 imm);
     void ma_subTestOverflow(Register rd, Register rs, Register rt, Label* overflow);
 
@@ -174,14 +181,12 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
     void convertUInt32ToDouble(Register src, FloatRegister dest);
     void convertUInt32ToFloat32(Register src, FloatRegister dest);
     void convertDoubleToFloat32(FloatRegister src, FloatRegister dest);
-    void branchTruncateDouble(FloatRegister src, Register dest, Label* fail);
     void convertDoubleToInt32(FloatRegister src, Register dest, Label* fail,
                               bool negativeZeroCheck = true);
     void convertFloat32ToInt32(FloatRegister src, Register dest, Label* fail,
                                bool negativeZeroCheck = true);
 
     void convertFloat32ToDouble(FloatRegister src, FloatRegister dest);
-    void branchTruncateFloat32(FloatRegister src, Register dest, Label* fail);
     void convertInt32ToFloat32(Register src, FloatRegister dest);
     void convertInt32ToFloat32(const Address& src, FloatRegister dest);
 
@@ -217,7 +222,7 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
 
     void writeDataRelocation(const Value& val) {
         if (val.isMarkable()) {
-            gc::Cell* cell = reinterpret_cast<gc::Cell *>(val.toGCThing());
+            gc::Cell* cell = val.toMarkablePointer();
             if (cell && gc::IsInsideNursery(cell))
                 embedsNurseryPointers_ = true;
             dataRelocations_.writeUnsigned(currentOffset());
@@ -321,6 +326,10 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
         branch(code);
     }
 
+    void jump(wasm::TrapDesc target) {
+        ma_b(target);
+    }
+
     void splitTag(Register src, Register dest) {
         ma_dsrl(dest, src, Imm32(JSVAL_TAG_SHIFT));
     }
@@ -335,38 +344,29 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
         return SecondScratchReg;
     }
 
-    void branchTestGCThing(Condition cond, const Address& address, Label* label);
-    void branchTestGCThing(Condition cond, const BaseIndex& src, Label* label);
-
-    void branchTestPrimitive(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestPrimitive(Condition cond, Register tag, Label* label);
-
-    void branchTestValue(Condition cond, const ValueOperand& value, const Value& v, Label* label);
-    void branchTestValue(Condition cond, const Address& valaddr, const ValueOperand& value,
-                         Label* label);
-
     // unboxing code
     void unboxNonDouble(const ValueOperand& operand, Register dest);
     void unboxNonDouble(const Address& src, Register dest);
     void unboxNonDouble(const BaseIndex& src, Register dest);
     void unboxInt32(const ValueOperand& operand, Register dest);
-    void unboxInt32(const Operand& operand, Register dest);
+    void unboxInt32(Register src, Register dest);
     void unboxInt32(const Address& src, Register dest);
     void unboxInt32(const BaseIndex& src, Register dest);
     void unboxBoolean(const ValueOperand& operand, Register dest);
-    void unboxBoolean(const Operand& operand, Register dest);
+    void unboxBoolean(Register src, Register dest);
     void unboxBoolean(const Address& src, Register dest);
     void unboxBoolean(const BaseIndex& src, Register dest);
     void unboxDouble(const ValueOperand& operand, FloatRegister dest);
+    void unboxDouble(Register src, Register dest);
     void unboxDouble(const Address& src, FloatRegister dest);
     void unboxString(const ValueOperand& operand, Register dest);
-    void unboxString(const Operand& operand, Register dest);
+    void unboxString(Register src, Register dest);
     void unboxString(const Address& src, Register dest);
     void unboxSymbol(const ValueOperand& src, Register dest);
-    void unboxSymbol(const Operand& src, Register dest);
+    void unboxSymbol(Register src, Register dest);
     void unboxSymbol(const Address& src, Register dest);
     void unboxObject(const ValueOperand& src, Register dest);
-    void unboxObject(const Operand& src, Register dest);
+    void unboxObject(Register src, Register dest);
     void unboxObject(const Address& src, Register dest);
     void unboxObject(const BaseIndex& src, Register dest) { unboxNonDouble(src, dest); }
     void unboxValue(const ValueOperand& src, AnyRegister dest);
@@ -409,185 +409,18 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
     void loadInt32OrDouble(const Address& src, FloatRegister dest);
     void loadInt32OrDouble(const BaseIndex& addr, FloatRegister dest);
     void loadConstantDouble(double dp, FloatRegister dest);
+    void loadConstantDouble(wasm::RawF64 d, FloatRegister dest);
 
     void boolValueToFloat32(const ValueOperand& operand, FloatRegister dest);
     void int32ValueToFloat32(const ValueOperand& operand, FloatRegister dest);
     void loadConstantFloat32(float f, FloatRegister dest);
+    void loadConstantFloat32(wasm::RawF32 f, FloatRegister dest);
 
-    void branchTestInt32(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestInt32(Condition cond, Register tag, Label* label);
-    void branchTestInt32(Condition cond, const Address& address, Label* label);
-    void branchTestInt32(Condition cond, const BaseIndex& src, Label* label);
-
-    void branchTestBoolean(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestBoolean(Condition cond, Register tag, Label* label);
-    void branchTestBoolean(Condition cond, const Address& address, Label* label);
-    void branchTestBoolean(Condition cond, const BaseIndex& src, Label* label);
-
-    void branch32(Condition cond, Register lhs, Register rhs, Label* label) {
-        ma_b(lhs, rhs, label, cond);
-    }
-    void branch32(Condition cond, Register lhs, Imm32 imm, Label* label) {
-        ma_b(lhs, imm, label, cond);
-    }
-    void branch32(Condition cond, const Operand& lhs, Register rhs, Label* label) {
-        if (lhs.getTag() == Operand::REG) {
-            ma_b(lhs.toReg(), rhs, label, cond);
-        } else {
-            branch32(cond, lhs.toAddress(), rhs, label);
-        }
-    }
-    void branch32(Condition cond, const Operand& lhs, Imm32 rhs, Label* label) {
-        if (lhs.getTag() == Operand::REG) {
-            ma_b(lhs.toReg(), rhs, label, cond);
-        } else {
-            branch32(cond, lhs.toAddress(), rhs, label);
-        }
-    }
-    void branch32(Condition cond, const Address& lhs, Register rhs, Label* label) {
-        load32(lhs, SecondScratchReg);
-        ma_b(SecondScratchReg, rhs, label, cond);
-    }
-    void branch32(Condition cond, const Address& lhs, Imm32 rhs, Label* label) {
-        load32(lhs, SecondScratchReg);
-        ma_b(SecondScratchReg, rhs, label, cond);
-    }
-    void branch32(Condition cond, const BaseIndex& lhs, Imm32 rhs, Label* label) {
-        load32(lhs, SecondScratchReg);
-        ma_b(SecondScratchReg, rhs, label, cond);
-    }
-    void branchPtr(Condition cond, const Address& lhs, Register rhs, Label* label) {
-        loadPtr(lhs, SecondScratchReg);
-        ma_b(SecondScratchReg, rhs, label, cond);
-    }
-
-    void branchPrivatePtr(Condition cond, const Address& lhs, ImmPtr ptr, Label* label) {
-        branchPtr(cond, lhs, ptr, label);
-    }
-
-    void branchPrivatePtr(Condition cond, const Address& lhs, Register ptr, Label* label) {
-        branchPtr(cond, lhs, ptr, label);
-    }
-
-    void branchPrivatePtr(Condition cond, Register lhs, ImmWord ptr, Label* label) {
-        branchPtr(cond, lhs, ptr, label);
-    }
-
-    void branchTestDouble(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestDouble(Condition cond, Register tag, Label* label);
-    void branchTestDouble(Condition cond, const Address& address, Label* label);
-    void branchTestDouble(Condition cond, const BaseIndex& src, Label* label);
-
-    void branchTestNull(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestNull(Condition cond, Register tag, Label* label);
-    void branchTestNull(Condition cond, const BaseIndex& src, Label* label);
-    void branchTestNull(Condition cond, const Address& address, Label* label);
     void testNullSet(Condition cond, const ValueOperand& value, Register dest);
 
-    void branchTestObject(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestObject(Condition cond, Register tag, Label* label);
-    void branchTestObject(Condition cond, const BaseIndex& src, Label* label);
-    void branchTestObject(Condition cond, const Address& src, Label* label);
     void testObjectSet(Condition cond, const ValueOperand& value, Register dest);
 
-    void branchTestString(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestString(Condition cond, Register tag, Label* label);
-    void branchTestString(Condition cond, const BaseIndex& src, Label* label);
-
-    void branchTestSymbol(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestSymbol(Condition cond, const Register& tag, Label* label);
-    void branchTestSymbol(Condition cond, const BaseIndex& src, Label* label);
-
-    void branchTestUndefined(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestUndefined(Condition cond, Register tag, Label* label);
-    void branchTestUndefined(Condition cond, const BaseIndex& src, Label* label);
-    void branchTestUndefined(Condition cond, const Address& address, Label* label);
     void testUndefinedSet(Condition cond, const ValueOperand& value, Register dest);
-
-    void branchTestNumber(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestNumber(Condition cond, Register tag, Label* label);
-
-    void branchTestMagic(Condition cond, const ValueOperand& value, Label* label);
-    void branchTestMagic(Condition cond, Register tag, Label* label);
-    void branchTestMagic(Condition cond, const Address& address, Label* label);
-    void branchTestMagic(Condition cond, const BaseIndex& src, Label* label);
-
-    void branchTestMagicValue(Condition cond, const ValueOperand& val, JSWhyMagic why,
-                              Label* label) {
-        MOZ_ASSERT(cond == Equal || cond == NotEqual);
-        branchTestValue(cond, val, MagicValue(why), label);
-    }
-
-    void branchTestInt32Truthy(bool b, const ValueOperand& value, Label* label);
-
-    void branchTestStringTruthy(bool b, const ValueOperand& value, Label* label);
-
-    void branchTestDoubleTruthy(bool b, FloatRegister value, Label* label);
-
-    void branchTestBooleanTruthy(bool b, const ValueOperand& operand, Label* label);
-
-    void branchTest32(Condition cond, Register lhs, Register rhs, Label* label) {
-        MOZ_ASSERT(cond == Zero || cond == NonZero || cond == Signed || cond == NotSigned);
-        if (lhs == rhs) {
-            ma_b(lhs, rhs, label, cond);
-        } else {
-            as_and(ScratchRegister, lhs, rhs);
-            ma_b(ScratchRegister, ScratchRegister, label, cond);
-        }
-    }
-    void branchTest32(Condition cond, Register lhs, Imm32 imm, Label* label) {
-        ma_li(ScratchRegister, imm);
-        branchTest32(cond, lhs, ScratchRegister, label);
-    }
-    void branchTest32(Condition cond, const Address& address, Imm32 imm, Label* label) {
-        load32(address, SecondScratchReg);
-        branchTest32(cond, SecondScratchReg, imm, label);
-    }
-    void branchTest32(Condition cond, AbsoluteAddress address, Imm32 imm, Label* label) {
-        load32(address, ScratchRegister);
-        branchTest32(cond, ScratchRegister, imm, label);
-    }
-    void branchTestPtr(Condition cond, Register lhs, Register rhs, Label* label) {
-        MOZ_ASSERT(cond == Zero || cond == NonZero || cond == Signed || cond == NotSigned);
-        if (lhs == rhs) {
-            ma_b(lhs, rhs, label, cond);
-        } else {
-            as_and(ScratchRegister, lhs, rhs);
-            ma_b(ScratchRegister, ScratchRegister, label, cond);
-        }
-    }
-    void branchTestPtr(Condition cond, Register lhs, const Imm32 rhs, Label* label) {
-        ma_li(ScratchRegister, rhs);
-        branchTestPtr(cond, lhs, ScratchRegister, label);
-    }
-    void branchTestPtr(Condition cond, const Address& lhs, Imm32 imm, Label* label) {
-        loadPtr(lhs, SecondScratchReg);
-        branchTestPtr(cond, SecondScratchReg, imm, label);
-    }
-    void branchTest64(Condition cond, Register64 lhs, Register64 rhs, Register temp,
-                      Label* label) {
-        branchTestPtr(cond, lhs.reg, rhs.reg, label);
-    }
-    void branchPtr(Condition cond, Register lhs, Register rhs, Label* label) {
-        ma_b(lhs, rhs, label, cond);
-    }
-    void branchPtr(Condition cond, Register lhs, ImmGCPtr ptr, Label* label) {
-        ma_b(lhs, ptr, label, cond);
-    }
-    void branchPtr(Condition cond, Register lhs, ImmWord imm, Label* label) {
-        ma_b(lhs, imm, label, cond);
-    }
-    void branchPtr(Condition cond, Register lhs, ImmPtr imm, Label* label) {
-        ma_b(lhs, imm, label, cond);
-    }
-    void branchPtr(Condition cond, Register lhs, wasm::SymbolicAddress imm, Label* label) {
-        movePtr(imm, SecondScratchReg);
-        ma_b(lhs, SecondScratchReg, label, cond);
-    }
-    void branchPtr(Condition cond, Register lhs, Imm32 imm, Label* label) {
-        ma_b(lhs, imm, label, cond);
-    }
-    inline void decBranchPtr(Condition cond, Register lhs, Imm32 imm, Label* label);
 
     // higher level tag testing code
     Address ToPayload(Address value) {
@@ -600,78 +433,16 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
     CodeOffsetJump jumpWithPatch(RepatchLabel* label, Label* documentation = nullptr);
 
     template <typename T>
-    CodeOffsetJump branchPtrWithPatch(Condition cond, Register reg, T ptr, RepatchLabel* label) {
-        movePtr(ptr, ScratchRegister);
-        Label skipJump;
-        ma_b(reg, ScratchRegister, &skipJump, InvertCondition(cond), ShortJump);
-        CodeOffsetJump off = jumpWithPatch(label);
-        bind(&skipJump);
-        return off;
-    }
-
-    template <typename T>
-    CodeOffsetJump branchPtrWithPatch(Condition cond, Address addr, T ptr, RepatchLabel* label) {
-        loadPtr(addr, SecondScratchReg);
-        movePtr(ptr, ScratchRegister);
-        Label skipJump;
-        ma_b(SecondScratchReg, ScratchRegister, &skipJump, InvertCondition(cond), ShortJump);
-        CodeOffsetJump off = jumpWithPatch(label);
-        bind(&skipJump);
-        return off;
-    }
-    void branchPtr(Condition cond, Address addr, ImmGCPtr ptr, Label* label) {
-        loadPtr(addr, SecondScratchReg);
-        ma_b(SecondScratchReg, ptr, label, cond);
-    }
-
-    void branchPtr(Condition cond, Address addr, ImmWord ptr, Label* label) {
-        loadPtr(addr, SecondScratchReg);
-        ma_b(SecondScratchReg, ptr, label, cond);
-    }
-    void branchPtr(Condition cond, Address addr, ImmPtr ptr, Label* label) {
-        loadPtr(addr, SecondScratchReg);
-        ma_b(SecondScratchReg, ptr, label, cond);
-    }
-    void branchPtr(Condition cond, AbsoluteAddress addr, Register ptr, Label* label) {
-        loadPtr(addr, SecondScratchReg);
-        ma_b(SecondScratchReg, ptr, label, cond);
-    }
-    void branchPtr(Condition cond, AbsoluteAddress addr, ImmWord ptr, Label* label) {
-        loadPtr(addr, SecondScratchReg);
-        ma_b(SecondScratchReg, ptr, label, cond);
-    }
-    void branchPtr(Condition cond, wasm::SymbolicAddress addr, Register ptr, Label* label) {
-        loadPtr(addr, SecondScratchReg);
-        ma_b(SecondScratchReg, ptr, label, cond);
-    }
-    void branch32(Condition cond, AbsoluteAddress lhs, Imm32 rhs, Label* label) {
-        load32(lhs, SecondScratchReg);
-        ma_b(SecondScratchReg, rhs, label, cond);
-    }
-    void branch32(Condition cond, AbsoluteAddress lhs, Register rhs, Label* label) {
-        load32(lhs, SecondScratchReg);
-        ma_b(SecondScratchReg, rhs, label, cond);
-    }
-    void branch32(Condition cond, wasm::SymbolicAddress addr, Imm32 imm, Label* label) {
-        load32(addr, SecondScratchReg);
-        ma_b(SecondScratchReg, imm, label, cond);
-    }
-
-    template <typename T>
     void loadUnboxedValue(const T& address, MIRType type, AnyRegister dest) {
         if (dest.isFloat())
             loadInt32OrDouble(address, dest.fpu());
-        else if (type == MIRType_Int32)
+        else if (type == MIRType::Int32)
             unboxInt32(address, dest.gpr());
-        else if (type == MIRType_Boolean)
+        else if (type == MIRType::Boolean)
             unboxBoolean(address, dest.gpr());
         else
             unboxNonDouble(address, dest.gpr());
     }
-
-    template <typename T>
-    void storeUnboxedValue(ConstantOrRegister value, MIRType valueType, const T& dest,
-                           MIRType slotType);
 
     template <typename T>
     void storeUnboxedPayload(ValueOperand value, T address, size_t nbytes) {
@@ -712,6 +483,10 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
     void storeValue(JSValueType type, Register reg, Address dest);
     void storeValue(const Value& val, Address dest);
     void storeValue(const Value& val, BaseIndex dest);
+    void storeValue(const Address& src, const Address& dest, Register temp) {
+        loadPtr(src, temp);
+        storePtr(temp, dest);
+    }
 
     void loadValue(Address src, ValueOperand val);
     void loadValue(Operand dest, ValueOperand val) {
@@ -723,13 +498,12 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
     void pushValue(ValueOperand val);
     void popValue(ValueOperand val);
     void pushValue(const Value& val) {
-        jsval_layout jv = JSVAL_TO_IMPL(val);
         if (val.isMarkable()) {
             writeDataRelocation(val);
-            movWithPatch(ImmWord(jv.asBits), ScratchRegister);
+            movWithPatch(ImmWord(val.asRawBits()), ScratchRegister);
             push(ScratchRegister);
         } else {
-            push(ImmWord(jv.asBits));
+            push(ImmWord(val.asRawBits()));
         }
     }
     void pushValue(JSValueType type, Register reg) {
@@ -1065,37 +839,8 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
 
     inline void incrementInt32Value(const Address& addr);
 
-    template <typename T>
-    void branchAdd32(Condition cond, T src, Register dest, Label* overflow) {
-        switch (cond) {
-          case Overflow:
-            ma_addTestOverflow(dest, dest, src, overflow);
-            break;
-          default:
-            MOZ_CRASH("NYI");
-        }
-    }
-    template <typename T>
-    void branchSub32(Condition cond, T src, Register dest, Label* overflow) {
-        switch (cond) {
-          case Overflow:
-            ma_subTestOverflow(dest, dest, src, overflow);
-            break;
-          case NonZero:
-          case Zero:
-            ma_subu(dest, src);
-            ma_b(dest, dest, overflow, cond);
-            break;
-          default:
-            MOZ_CRASH("NYI");
-        }
-    }
-
     void move32(Imm32 imm, Register dest);
     void move32(Register src, Register dest);
-    void move64(Register64 src, Register64 dest) {
-        movePtr(src.reg, dest.reg);
-    }
 
     void movePtr(Register src, Register dest);
     void movePtr(ImmWord imm, Register dest);
@@ -1128,25 +873,6 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
     void loadPtr(AbsoluteAddress address, Register dest);
     void loadPtr(wasm::SymbolicAddress address, Register dest);
 
-    void branch64(Condition cond, const Address& lhs, Imm64 val, Label* label) {
-        MOZ_ASSERT(cond == Assembler::NotEqual,
-                   "other condition codes not supported");
-
-        branchPtr(cond, lhs, ImmWord(val.value), label);
-    }
-
-    void branch64(Condition cond, const Address& lhs, const Address& rhs, Register scratch,
-                  Label* label)
-    {
-        MOZ_ASSERT(cond == Assembler::NotEqual,
-                   "other condition codes not supported");
-        MOZ_ASSERT(lhs.base != scratch);
-        MOZ_ASSERT(rhs.base != scratch);
-
-        loadPtr(rhs, scratch);
-        branchPtr(cond, lhs, scratch, label);
-    }
-
     void loadPrivate(const Address& address, Register dest);
 
     void loadInt32x1(const Address& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
@@ -1161,26 +887,25 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
     void storeInt32x2(FloatRegister src, const BaseIndex& dest) { MOZ_CRASH("NYI"); }
     void storeInt32x3(FloatRegister src, const Address& dest) { MOZ_CRASH("NYI"); }
     void storeInt32x3(FloatRegister src, const BaseIndex& dest) { MOZ_CRASH("NYI"); }
-    void loadAlignedInt32x4(const Address& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
-    void storeAlignedInt32x4(FloatRegister src, Address addr) { MOZ_CRASH("NYI"); }
-    void loadUnalignedInt32x4(const Address& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
-    void loadUnalignedInt32x4(const BaseIndex& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
-    void storeUnalignedInt32x4(FloatRegister src, Address addr) { MOZ_CRASH("NYI"); }
-    void storeUnalignedInt32x4(FloatRegister src, BaseIndex addr) { MOZ_CRASH("NYI"); }
+    void loadAlignedSimd128Int(const Address& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
+    void storeAlignedSimd128Int(FloatRegister src, Address addr) { MOZ_CRASH("NYI"); }
+    void loadUnalignedSimd128Int(const Address& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
+    void loadUnalignedSimd128Int(const BaseIndex& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
+    void storeUnalignedSimd128Int(FloatRegister src, Address addr) { MOZ_CRASH("NYI"); }
+    void storeUnalignedSimd128Int(FloatRegister src, BaseIndex addr) { MOZ_CRASH("NYI"); }
 
     void loadFloat32x3(const Address& src, FloatRegister dest) { MOZ_CRASH("NYI"); }
     void loadFloat32x3(const BaseIndex& src, FloatRegister dest) { MOZ_CRASH("NYI"); }
-    void storeFloat32x3(FloatRegister src, const Address& dest) { MOZ_CRASH("NYI"); }
-    void storeFloat32x3(FloatRegister src, const BaseIndex& dest) { MOZ_CRASH("NYI"); }
-    void loadAlignedFloat32x4(const Address& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
-    void storeAlignedFloat32x4(FloatRegister src, Address addr) { MOZ_CRASH("NYI"); }
-    void loadUnalignedFloat32x4(const Address& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
-    void loadUnalignedFloat32x4(const BaseIndex& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
-    void storeUnalignedFloat32x4(FloatRegister src, Address addr) { MOZ_CRASH("NYI"); }
-    void storeUnalignedFloat32x4(FloatRegister src, BaseIndex addr) { MOZ_CRASH("NYI"); }
+    void loadAlignedSimd128Float(const Address& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
+    void storeAlignedSimd128Float(FloatRegister src, Address addr) { MOZ_CRASH("NYI"); }
+    void loadUnalignedSimd128Float(const Address& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
+    void loadUnalignedSimd128Float(const BaseIndex& addr, FloatRegister dest) { MOZ_CRASH("NYI"); }
+    void storeUnalignedSimd128Float(FloatRegister src, Address addr) { MOZ_CRASH("NYI"); }
+    void storeUnalignedSimd128Float(FloatRegister src, BaseIndex addr) { MOZ_CRASH("NYI"); }
 
     void loadDouble(const Address& addr, FloatRegister dest);
     void loadDouble(const BaseIndex& src, FloatRegister dest);
+    void loadUnalignedDouble(const BaseIndex& src, Register temp, FloatRegister dest);
 
     // Load a float value into a register, then expand it to a double.
     void loadFloatAsDouble(const Address& addr, FloatRegister dest);
@@ -1188,6 +913,7 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
 
     void loadFloat32(const Address& addr, FloatRegister dest);
     void loadFloat32(const BaseIndex& src, FloatRegister dest);
+    void loadUnalignedFloat32(const BaseIndex& src, Register temp, FloatRegister dest);
 
     void store8(Register src, const Address& address);
     void store8(Imm32 imm, const Address& address);
@@ -1211,6 +937,10 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
         store32(src, address);
     }
 
+    void store64(Imm64 imm, Address address) {
+        storePtr(ImmWord(imm.value), address);
+    }
+
     void store64(Register64 src, Address address) {
         storePtr(src.reg, address);
     }
@@ -1221,40 +951,28 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
     void storePtr(Register src, const Address& address);
     void storePtr(Register src, const BaseIndex& address);
     void storePtr(Register src, AbsoluteAddress dest);
-    void storeDouble(FloatRegister src, Address addr) {
-        ma_sd(src, addr);
-    }
-    void storeDouble(FloatRegister src, BaseIndex addr) {
-        MOZ_ASSERT(addr.offset == 0);
-        ma_sd(src, addr);
-    }
+
+    void storeUnalignedFloat32(FloatRegister src, Register temp, const BaseIndex& dest);
+    void storeUnalignedDouble(FloatRegister src, Register temp, const BaseIndex& dest);
+
     void moveDouble(FloatRegister src, FloatRegister dest) {
         as_movd(dest, src);
-    }
-
-    void storeFloat32(FloatRegister src, Address addr) {
-        ma_ss(src, addr);
-    }
-    void storeFloat32(FloatRegister src, BaseIndex addr) {
-        MOZ_ASSERT(addr.offset == 0);
-        ma_ss(src, addr);
     }
 
     void zeroDouble(FloatRegister reg) {
         moveToDouble(zero, reg);
     }
 
-    void clampIntToUint8(Register reg);
+    void convertInt64ToDouble(Register src, FloatRegister dest);
+    void convertInt64ToFloat32(Register src, FloatRegister dest);
 
-    void convertUInt64ToDouble(Register64 src, Register temp, FloatRegister dest);
+    void convertUInt64ToDouble(Register src, FloatRegister dest);
+    void convertUInt64ToFloat32(Register src, FloatRegister dest);
+
+    static bool convertUInt64ToDoubleNeedsTemp();
+    void convertUInt64ToDouble(Register64 src, FloatRegister dest, Register temp);
 
     void breakpoint();
-
-    void branchDouble(DoubleCondition cond, FloatRegister lhs, FloatRegister rhs,
-                      Label* label);
-
-    void branchFloat(DoubleCondition cond, FloatRegister lhs, FloatRegister rhs,
-                     Label* label);
 
     void checkStackAlignment();
 
@@ -1264,20 +982,15 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
     // convert it to double. Else, branch to failure.
     void ensureDouble(const ValueOperand& source, FloatRegister dest, Label* failure);
 
-    template <typename T1, typename T2>
-    void cmpPtrSet(Assembler::Condition cond, T1 lhs, T2 rhs, Register dest)
-    {
-        ma_cmp_set(dest, lhs, rhs, cond);
-    }
     void cmpPtrSet(Assembler::Condition cond, Address lhs, ImmPtr rhs, Register dest);
     void cmpPtrSet(Assembler::Condition cond, Register lhs, Address rhs, Register dest);
 
-    template <typename T1, typename T2>
-    void cmp32Set(Assembler::Condition cond, T1 lhs, T2 rhs, Register dest)
+    void cmp32Set(Assembler::Condition cond, Register lhs, Address rhs, Register dest);
+
+    void cmp64Set(Assembler::Condition cond, Register lhs, Imm32 rhs, Register dest)
     {
         ma_cmp_set(dest, lhs, rhs, cond);
     }
-    void cmp32Set(Assembler::Condition cond, Register lhs, Address rhs, Register dest);
 
   protected:
     bool buildOOLFakeExitFrame(void* fakeReturnAddr);
@@ -1285,11 +998,6 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
   public:
     CodeOffset labelForPatch() {
         return CodeOffset(nextOffset().getOffset());
-    }
-
-    void memIntToValue(Address Source, Address Dest) {
-        load32(Source, ScratchRegister);
-        storeValue(JSVAL_TYPE_INT32, ScratchRegister, Dest);
     }
 
     void lea(Operand addr, Register dest) {
@@ -1311,16 +1019,13 @@ class MacroAssemblerMIPS64Compat : public MacroAssemblerMIPS64
         as_movs(dest, src);
     }
 
-    void branchPtrInNurseryRange(Condition cond, Register ptr, Register temp, Label* label);
-    void branchValueIsNurseryObject(Condition cond, ValueOperand value, Register temp,
-                                    Label* label);
-
-    void loadWasmActivation(Register dest) {
-        loadPtr(Address(GlobalReg, wasm::ActivationGlobalDataOffset - AsmJSGlobalRegBias), dest);
+    void loadWasmGlobalPtr(uint32_t globalDataOffset, Register dest) {
+        loadPtr(Address(GlobalReg, globalDataOffset - WasmGlobalRegBias), dest);
     }
-    void loadAsmJSHeapRegisterFromGlobalData() {
-        MOZ_ASSERT(Imm16::IsInSignedRange(wasm::HeapGlobalDataOffset - AsmJSGlobalRegBias));
-        loadPtr(Address(GlobalReg, wasm::HeapGlobalDataOffset - AsmJSGlobalRegBias), HeapReg);
+    void loadWasmPinnedRegsFromTls() {
+        loadPtr(Address(WasmTlsReg, offsetof(wasm::TlsData, memoryBase)), HeapReg);
+        loadPtr(Address(WasmTlsReg, offsetof(wasm::TlsData, globalData)), GlobalReg);
+        ma_daddu(GlobalReg, Imm32(WasmGlobalRegBias));
     }
 
     // Instrumentation for entering and leaving the profiler.

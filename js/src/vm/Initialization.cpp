@@ -15,6 +15,7 @@
 #include "jstypes.h"
 
 #include "builtin/AtomicsObject.h"
+#include "ds/MemoryProtectionExceptionHandler.h"
 #include "gc/Statistics.h"
 #include "jit/ExecutableAllocator.h"
 #include "jit/Ion.h"
@@ -28,6 +29,7 @@
 #include "vm/Runtime.h"
 #include "vm/Time.h"
 #include "vm/TraceLogging.h"
+#include "wasm/WasmInstance.h"
 
 using JS::detail::InitState;
 using JS::detail::libraryInitState;
@@ -59,9 +61,18 @@ CheckMessageParameterCounts()
 }
 #endif /* DEBUG */
 
-JS_PUBLIC_API(bool)
-JS_Init(void)
+#define RETURN_IF_FAIL(code) do { if (!code) return #code " failed"; } while (0)
+
+JS_PUBLIC_API(const char*)
+JS::detail::InitWithFailureDiagnostic(bool isDebugBuild)
 {
+    // Verify that our DEBUG setting matches the caller's.
+#ifdef DEBUG
+    MOZ_RELEASE_ASSERT(isDebugBuild);
+#else
+    MOZ_RELEASE_ASSERT(!isDebugBuild);
+#endif
+
     MOZ_ASSERT(libraryInitState == InitState::Uninitialized,
                "must call JS_Init once before any JSAPI operation except "
                "JS_SetICUMemoryFunctions");
@@ -70,24 +81,35 @@ JS_Init(void)
 
     PRMJ_NowInit();
 
+    // The first invocation of `ProcessCreation` creates a temporary thread
+    // and crashes if that fails, i.e. because we're out of memory. To prevent
+    // that from happening at some later time, get it out of the way during
+    // startup.
+    bool ignored;
+    mozilla::TimeStamp::ProcessCreation(ignored);
+
 #ifdef DEBUG
     CheckMessageParameterCounts();
 #endif
 
     using js::TlsPerThreadData;
-    if (!TlsPerThreadData.init())
-        return false;
+    RETURN_IF_FAIL(TlsPerThreadData.init());
 
 #if defined(DEBUG) || defined(JS_OOM_BREAKPOINT)
-    if (!js::oom::InitThreadType())
-        return false;
+    RETURN_IF_FAIL(js::oom::InitThreadType());
     js::oom::SetThreadType(js::oom::THREAD_TYPE_MAIN);
 #endif
 
-    js::jit::ExecutableAllocator::initStatic();
+    RETURN_IF_FAIL(js::Mutex::Init());
 
-    if (!js::jit::InitializeIon())
-        return false;
+    RETURN_IF_FAIL(js::wasm::InitInstanceStaticData());
+
+    js::gc::InitMemorySubsystem(); // Ensure gc::SystemPageSize() works.
+    RETURN_IF_FAIL(js::jit::InitProcessExecutableMemory());
+
+    MOZ_ALWAYS_TRUE(js::MemoryProtectionExceptionHandler::install());
+
+    RETURN_IF_FAIL(js::jit::InitializeIon());
 
     js::DateTimeInfo::init();
 
@@ -95,21 +117,18 @@ JS_Init(void)
     UErrorCode err = U_ZERO_ERROR;
     u_init(&err);
     if (U_FAILURE(err))
-        return false;
+        return "u_init() failed";
 #endif // EXPOSE_INTL_API
 
-    if (!js::CreateHelperThreadsState())
-        return false;
-
-    if (!FutexRuntime::initialize())
-        return false;
-
-    if (!js::gcstats::Statistics::initialize())
-        return false;
+    RETURN_IF_FAIL(js::CreateHelperThreadsState());
+    RETURN_IF_FAIL(FutexRuntime::initialize());
+    RETURN_IF_FAIL(js::gcstats::Statistics::initialize());
 
     libraryInitState = InitState::Running;
-    return true;
+    return nullptr;
 }
+
+#undef RETURN_IF_FAIL
 
 JS_PUBLIC_API(void)
 JS_ShutDown(void)
@@ -135,6 +154,12 @@ JS_ShutDown(void)
     js::DestroyTraceLoggerGraphState();
 #endif
 
+    js::MemoryProtectionExceptionHandler::uninstall();
+
+    js::wasm::ShutDownInstanceStaticData();
+
+    js::Mutex::ShutDown();
+
     // The only difficult-to-address reason for the restriction that you can't
     // call JS_Init/stuff/JS_ShutDown multiple times is the Windows PRMJ
     // NowInit initialization code, which uses PR_CallOnce to initialize the
@@ -149,6 +174,9 @@ JS_ShutDown(void)
 #if EXPOSE_INTL_API
     u_cleanup();
 #endif // EXPOSE_INTL_API
+
+    if (!JSRuntime::hasLiveRuntimes())
+        js::jit::ReleaseProcessExecutableMemory();
 
     libraryInitState = InitState::ShutDown;
 }

@@ -16,14 +16,15 @@
 #include "jsscript.h"
 #include "jsutil.h"
 
-#include "asmjs/WasmFrameIterator.h"
 #include "gc/Rooting.h"
 #include "jit/JitFrameIterator.h"
 #ifdef CHECK_OSIPOINT_REGISTERS
 #include "jit/Registers.h" // for RegisterDump
 #endif
 #include "js/RootingAPI.h"
+#include "vm/ArgumentsObject.h"
 #include "vm/SavedFrame.h"
+#include "wasm/WasmFrameIterator.h"
 
 struct JSCompartment;
 
@@ -35,23 +36,24 @@ class AutoEntryMonitor;
 
 namespace js {
 
-class ArgumentsObject;
 class InterpreterRegs;
 class CallObject;
 class FrameIter;
-class ScopeObject;
+class EnvironmentObject;
 class ScriptFrameIter;
 class SPSProfiler;
 class InterpreterFrame;
-class StaticBlockScope;
-class ClonedBlockObject;
-
-class ScopeCoordinate;
+class LexicalEnvironmentObject;
+class EnvironmentIter;
+class EnvironmentCoordinate;
 
 class SavedFrame;
 
 namespace jit {
 class CommonFrameLayout;
+}
+namespace wasm {
+class Instance;
 }
 
 // VM stack layout
@@ -85,7 +87,7 @@ class CommonFrameLayout;
 // InterpreterActivation) is a local var of js::Interpret.
 
 enum MaybeCheckAliasing { CHECK_ALIASING = true, DONT_CHECK_ALIASING = false };
-enum MaybeCheckLexical { CheckLexical = true, DontCheckLexical = false };
+enum MaybeCheckTDZ { CheckTDZ = true, DontCheckTDZ = false };
 
 /*****************************************************************************/
 
@@ -194,14 +196,18 @@ class AbstractFramePtr
 
     explicit operator bool() const { return !!ptr_; }
 
-    inline JSObject* scopeChain() const;
+    inline JSObject* environmentChain() const;
     inline CallObject& callObj() const;
-    inline bool initFunctionScopeObjects(JSContext* cx);
-    inline void pushOnScopeChain(ScopeObject& scope);
+    inline bool initFunctionEnvironmentObjects(JSContext* cx);
+    inline bool pushVarEnvironment(JSContext* cx, HandleScope scope);
+    template <typename SpecificEnvironment>
+    inline void pushOnEnvironmentChain(SpecificEnvironment& env);
+    template <typename SpecificEnvironment>
+    inline void popOffEnvironmentChain();
 
     inline JSCompartment* compartment() const;
 
-    inline bool hasCallObj() const;
+    inline bool hasInitialEnvironment() const;
     inline bool isGlobalFrame() const;
     inline bool isModuleFrame() const;
     inline bool isEvalFrame() const;
@@ -215,6 +221,8 @@ class AbstractFramePtr
     inline Value& thisArgument() const;
 
     inline Value newTarget() const;
+
+    inline bool debuggerNeedsCheckPrimitiveReturn() const;
 
     inline bool isFunctionFrame() const;
     inline bool isNonStrictDirectEvalFrame() const;
@@ -231,8 +239,6 @@ class AbstractFramePtr
     inline void initArgsObj(ArgumentsObject& argsobj) const;
     inline bool createSingleton() const;
 
-    inline bool copyRawFrameSlots(AutoValueVector* vec) const;
-
     inline Value& unaliasedLocal(uint32_t i);
     inline Value& unaliasedFormal(unsigned i, MaybeCheckAliasing checkAliasing = CHECK_ALIASING);
     inline Value& unaliasedActual(unsigned i, MaybeCheckAliasing checkAliasing = CHECK_ALIASING);
@@ -248,11 +254,6 @@ class AbstractFramePtr
 
     inline HandleValue returnValue() const;
     inline void setReturnValue(const Value& rval) const;
-
-    inline bool freshenBlock(JSContext* cx) const;
-
-    inline void popBlock(JSContext* cx) const;
-    inline void popWith(JSContext* cx) const;
 
     friend void GDBTestInitAbstractFramePtr(AbstractFramePtr&, void*);
     friend void GDBTestInitAbstractFramePtr(AbstractFramePtr&, InterpreterFrame*);
@@ -280,7 +281,7 @@ class InterpreterFrame
         RESUMED_GENERATOR      =        0x2,  /* frame is for a resumed generator invocation */
 
         /* Function prologue state */
-        HAS_CALL_OBJ           =        0x4,  /* CallObject created for needsCallObject function */
+        HAS_INITIAL_ENV        =        0x4,  /* callobj created for function or var env for eval */
         HAS_ARGS_OBJ           =        0x8,  /* ArgumentsObject created for needsArgsObj script */
 
         /* Lazy frame initialization */
@@ -296,7 +297,7 @@ class InterpreterFrame
         DEBUGGEE               =       0x40,  /* Execution is being observed by Debugger */
 
         /* Used in tracking calls and profiling (see vm/SPSProfiler.cpp) */
-        HAS_PUSHED_SPS_FRAME   =       0x80,  /* SPS was notified of enty */
+        HAS_PUSHED_SPS_FRAME   =       0x80,  /* SPS was notified of entry */
 
         /*
          * If set, we entered one of the JITs and ScriptFrameIter should skip
@@ -318,7 +319,7 @@ class InterpreterFrame
     mutable uint32_t    flags_;         /* bits described by Flags */
     uint32_t            nactual_;       /* number of actual arguments, for function frames */
     JSScript*           script_;        /* the script we're executing */
-    JSObject*           scopeChain_;    /* current scope chain */
+    JSObject*           envChain_;      /* current environment chain */
     Value               rval_;          /* if HAS_RVAL, return value of the frame */
     ArgumentsObject*    argsObj_;       /* if HAS_ARGS_OBJ, the call's arguments object */
 
@@ -373,7 +374,7 @@ class InterpreterFrame
 
     /* Used for global and eval frames. */
     void initExecuteFrame(JSContext* cx, HandleScript script, AbstractFramePtr prev,
-                          const Value& newTargetValue, HandleObject scopeChain);
+                          const Value& newTargetValue, HandleObject envChain);
 
   public:
     /*
@@ -396,16 +397,14 @@ class InterpreterFrame
      */
 
     bool prologue(JSContext* cx);
-    void epilogue(JSContext* cx);
+    void epilogue(JSContext* cx, jsbytecode* pc);
 
     bool checkReturn(JSContext* cx, HandleValue thisv);
 
-    bool initFunctionScopeObjects(JSContext* cx);
+    bool initFunctionEnvironmentObjects(JSContext* cx);
 
     /*
-     * Initialize local variables of newly-pushed frame. 'var' bindings are
-     * initialized to undefined and lexical bindings are initialized to
-     * JS_UNINITIALIZED_LEXICAL.
+     * Initialize locals of newly-pushed frame to undefined.
      */
     void initLocals();
 
@@ -481,14 +480,11 @@ class InterpreterFrame
      * callee are the 'formal' arguments. When the caller passes less actual
      * arguments, missing formal arguments are padded with |undefined|.
      *
-     * When a local/formal variable is "aliased" (accessed by nested closures,
-     * dynamic scope operations, or 'arguments), the canonical location for
-     * that value is the slot of an activation object (scope or arguments).
-     * Currently, aliased locals don't have stack slots assigned to them, but
-     * all formals are given slots in *both* the stack frame and heap objects,
-     * even though, as just described, only one should ever be accessed. Thus,
-     * it is up to the code performing an access to access the correct value.
-     * These functions assert that accesses to stack values are unaliased.
+     * When a local/formal variable is aliased (accessed by nested closures,
+     * environment operations, or 'arguments'), the canonical location for
+     * that value is the slot of an environment object.  Aliased locals don't
+     * have stack slots assigned to them.  These functions assert that
+     * accesses to stack values are unaliased.
      */
 
     inline Value& unaliasedLocal(uint32_t i);
@@ -497,8 +493,6 @@ class InterpreterFrame
     inline Value& unaliasedFormal(unsigned i, MaybeCheckAliasing = CHECK_ALIASING);
     inline Value& unaliasedActual(unsigned i, MaybeCheckAliasing = CHECK_ALIASING);
     template <class Op> inline void unaliasedForEachActual(Op op);
-
-    bool copyRawFrameSlots(AutoValueVector* v);
 
     unsigned numFormalArgs() const { MOZ_ASSERT(hasArgs()); return callee().nargs(); }
     unsigned numActualArgs() const { MOZ_ASSERT(hasArgs()); return nactual_; }
@@ -523,55 +517,57 @@ class InterpreterFrame
     JSObject* createRestParameter(JSContext* cx);
 
     /*
-     * Scope chain
+     * Environment chain
      *
-     * In theory, the scope chain would contain an object for every lexical
-     * scope. However, only objects that are required for dynamic lookup are
-     * actually created.
+     * In theory, the environment chain would contain an object for every
+     * lexical scope. However, only objects that are required for dynamic
+     * lookup are actually created.
      *
-     * Given that an InterpreterFrame corresponds roughly to a ES5 Execution Context
-     * (ES5 10.3), InterpreterFrame::varObj corresponds to the VariableEnvironment
-     * component of a Exection Context. Intuitively, the variables object is
-     * where new bindings (variables and functions) are stored. One might
-     * expect that this is either the Call object or scopeChain.globalObj for
-     * function or global code, respectively, however the JSAPI allows calls of
-     * Execute to specify a variables object on the scope chain other than the
-     * call/global object. This allows embeddings to run multiple scripts under
-     * the same global, each time using a new variables object to collect and
-     * discard the script's global variables.
+     * Given that an InterpreterFrame corresponds roughly to a ES Execution
+     * Context (ES 10.3), InterpreterFrame::varObj corresponds to the
+     * VariableEnvironment component of a Exection Context. Intuitively, the
+     * variables object is where new bindings (variables and functions) are
+     * stored. One might expect that this is either the Call object or
+     * envChain.globalObj for function or global code, respectively, however
+     * the JSAPI allows calls of Execute to specify a variables object on the
+     * environment chain other than the call/global object. This allows
+     * embeddings to run multiple scripts under the same global, each time
+     * using a new variables object to collect and discard the script's global
+     * variables.
      */
 
-    inline HandleObject scopeChain() const;
+    inline HandleObject environmentChain() const;
 
-    inline ScopeObject& aliasedVarScope(ScopeCoordinate sc) const;
+    inline EnvironmentObject& aliasedEnvironment(EnvironmentCoordinate ec) const;
     inline GlobalObject& global() const;
     inline CallObject& callObj() const;
     inline JSObject& varObj() const;
-    inline ClonedBlockObject& extensibleLexicalScope() const;
+    inline LexicalEnvironmentObject& extensibleLexicalEnvironment() const;
 
-    inline void pushOnScopeChain(ScopeObject& scope);
-    inline void popOffScopeChain();
-    inline void replaceInnermostScope(ScopeObject& scope);
+    template <typename SpecificEnvironment>
+    inline void pushOnEnvironmentChain(SpecificEnvironment& env);
+    template <typename SpecificEnvironment>
+    inline void popOffEnvironmentChain();
+    inline void replaceInnermostEnvironment(EnvironmentObject& env);
 
-    /*
-     * For blocks with aliased locals, these interfaces push and pop entries on
-     * the scope chain.  The "freshen" operation replaces the current block
-     * with a fresh copy of it, to implement semantics providing distinct
-     * bindings per iteration of a for-loop.
-     */
-
-    bool pushBlock(JSContext* cx, StaticBlockScope& block);
-    void popBlock(JSContext* cx);
-    bool freshenBlock(JSContext* cx);
+    // Push a VarEnvironmentObject for function frames of functions that have
+    // parameter expressions with closed over var bindings.
+    bool pushVarEnvironment(JSContext* cx, HandleScope scope);
 
     /*
-     * With
-     *
-     * Entering/leaving a |with| block pushes/pops an object on the scope chain.
-     * Pushing uses pushOnScopeChain, popping should use popWith.
+     * For lexical envs with aliased locals, these interfaces push and pop
+     * entries on the environment chain.  The "freshen" operation replaces the
+     * current lexical env with a fresh copy of it, to implement semantics
+     * providing distinct bindings per iteration of a for(;;) loop whose head
+     * has a lexical declaration.  The "recreate" operation replaces the
+     * current lexical env with a copy of it containing uninitialized
+     * bindings, to implement semantics providing distinct bindings per
+     * iteration of a for-in/of loop.
      */
 
-    void popWith(JSContext* cx);
+    bool pushLexicalEnvironment(JSContext* cx, Handle<LexicalScope*> scope);
+    bool freshenLexicalEnvironment(JSContext* cx);
+    bool recreateLexicalEnvironment(JSContext* cx);
 
     /*
      * Script
@@ -687,11 +683,11 @@ class InterpreterFrame
         markReturnValue();
     }
 
-    void resumeGeneratorFrame(JSObject* scopeChain) {
+    void resumeGeneratorFrame(JSObject* envChain) {
         MOZ_ASSERT(script()->isGenerator());
         MOZ_ASSERT(isFunctionFrame());
-        flags_ |= HAS_CALL_OBJ;
-        scopeChain_ = scopeChain;
+        flags_ |= HAS_INITIAL_ENV;
+        envChain_ = envChain;
     }
 
     /*
@@ -717,10 +713,10 @@ class InterpreterFrame
      * time the call/args object are created).
      */
 
-    inline bool hasCallObj() const;
+    inline bool hasInitialEnvironment() const;
 
-    bool hasCallObjUnchecked() const {
-        return flags_ & HAS_CALL_OBJ;
+    bool hasInitialEnvironmentUnchecked() const {
+        return flags_ & HAS_INITIAL_ENV;
     }
 
     bool hasArgsObj() const {
@@ -747,9 +743,9 @@ class InterpreterFrame
      *
      * - Don't bother to JIT it, because it's probably short-lived.
      *
-     * - It is required to have a scope chain object outside the
-     *   js::ScopeObject hierarchy: either a global object, or a
-     *   DebugScopeObject (not a ScopeObject, despite the name)
+     * - It is required to have a environment chain object outside the
+     *   js::EnvironmentObject hierarchy: either a global object, or a
+     *   DebugEnvironmentProxy.
      */
     bool isDebuggerEvalFrame() const {
         return isEvalFrame() && !!evalInFramePrev_;
@@ -894,7 +890,7 @@ class InterpreterStack
 
     // For execution of eval or global code.
     InterpreterFrame* pushExecuteFrame(JSContext* cx, HandleScript script,
-                                       const Value& newTargetValue, HandleObject scopeChain,
+                                       const Value& newTargetValue, HandleObject envChain,
                                        AbstractFramePtr evalInFrame);
 
     // Called to invoke a function.
@@ -910,7 +906,7 @@ class InterpreterStack
 
     bool resumeGeneratorCallFrame(JSContext* cx, InterpreterRegs& regs,
                                   HandleFunction callee, HandleValue newTarget,
-                                  HandleObject scopeChain);
+                                  HandleObject envChain);
 
     inline void purge(JSRuntime* rt);
 
@@ -923,46 +919,111 @@ void MarkInterpreterActivations(JSRuntime* rt, JSTracer* trc);
 
 /*****************************************************************************/
 
+/** Base class for all function call args. */
+class AnyInvokeArgs : public JS::CallArgs
+{
+};
+
+/** Base class for all function construction args. */
+class AnyConstructArgs : public JS::CallArgs
+{
+    // Only js::Construct (or internal methods that call the qualified CallArgs
+    // versions) should do these things!
+    void setCallee(const Value& v) = delete;
+    void setThis(const Value& v) = delete;
+    MutableHandleValue newTarget() const = delete;
+    MutableHandleValue rval() const = delete;
+};
+
 namespace detail {
 
-class GenericInvokeArgs : public JS::CallArgs
+/** Function call/construct args of statically-unknown count. */
+template <MaybeConstruct Construct>
+class GenericArgsBase
+  : public mozilla::Conditional<Construct, AnyConstructArgs, AnyInvokeArgs>::Type
 {
   protected:
     AutoValueVector v_;
 
-    explicit GenericInvokeArgs(JSContext* cx) : v_(cx) {}
+    explicit GenericArgsBase(JSContext* cx) : v_(cx) {}
 
-    bool init(unsigned argc, bool construct) {
-        MOZ_ASSERT(2 + argc + construct > argc);  // no overflow
-        if (!v_.resize(2 + argc + construct))
+  public:
+    bool init(JSContext* cx, unsigned argc) {
+        if (argc > ARGS_LENGTH_MAX) {
+            JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_TOO_MANY_ARGUMENTS);
+            return false;
+        }
+
+        // callee, this, arguments[, new.target iff constructing]
+        size_t len = 2 + argc + uint32_t(Construct);
+        MOZ_ASSERT(len > argc);  // no overflow
+        if (!v_.resize(len))
             return false;
 
         *static_cast<JS::CallArgs*>(this) = CallArgsFromVp(argc, v_.begin());
-        constructing_ = construct;
+        this->constructing_ = Construct;
+        if (Construct)
+            this->CallArgs::setThis(MagicValue(JS_IS_CONSTRUCTING));
         return true;
+    }
+};
+
+/** Function call/construct args of statically-known count. */
+template <MaybeConstruct Construct, size_t N>
+class FixedArgsBase
+  : public mozilla::Conditional<Construct, AnyConstructArgs, AnyInvokeArgs>::Type
+{
+    static_assert(N <= ARGS_LENGTH_MAX, "o/~ too many args o/~");
+
+  protected:
+    JS::AutoValueArray<2 + N + uint32_t(Construct)> v_;
+
+    explicit FixedArgsBase(JSContext* cx) : v_(cx) {
+        *static_cast<JS::CallArgs*>(this) = CallArgsFromVp(N, v_.begin());
+        this->constructing_ = Construct;
+        if (Construct)
+            this->CallArgs::setThis(MagicValue(JS_IS_CONSTRUCTING));
     }
 };
 
 } // namespace detail
 
-class InvokeArgs : public detail::GenericInvokeArgs
+/** Function call args of statically-unknown count. */
+class InvokeArgs : public detail::GenericArgsBase<NO_CONSTRUCT>
 {
-  public:
-    explicit InvokeArgs(JSContext* cx) : detail::GenericInvokeArgs(cx) {}
+    using Base = detail::GenericArgsBase<NO_CONSTRUCT>;
 
-    bool init(unsigned argc) {
-        return detail::GenericInvokeArgs::init(argc, false);
-    }
+  public:
+    explicit InvokeArgs(JSContext* cx) : Base(cx) {}
 };
 
-class ConstructArgs : public detail::GenericInvokeArgs
+/** Function call args of statically-known count. */
+template <size_t N>
+class FixedInvokeArgs : public detail::FixedArgsBase<NO_CONSTRUCT, N>
 {
-  public:
-    explicit ConstructArgs(JSContext* cx) : detail::GenericInvokeArgs(cx) {}
+    using Base = detail::FixedArgsBase<NO_CONSTRUCT, N>;
 
-    bool init(unsigned argc) {
-        return detail::GenericInvokeArgs::init(argc, true);
-    }
+  public:
+    explicit FixedInvokeArgs(JSContext* cx) : Base(cx) {}
+};
+
+/** Function construct args of statically-unknown count. */
+class ConstructArgs : public detail::GenericArgsBase<CONSTRUCT>
+{
+    using Base = detail::GenericArgsBase<CONSTRUCT>;
+
+  public:
+    explicit ConstructArgs(JSContext* cx) : Base(cx) {}
+};
+
+/** Function call args of statically-known count. */
+template <size_t N>
+class FixedConstructArgs : public detail::FixedArgsBase<CONSTRUCT, N>
+{
+    using Base = detail::FixedArgsBase<CONSTRUCT, N>;
+
+  public:
+    explicit FixedConstructArgs(JSContext* cx) : Base(cx) {}
 };
 
 template <class Args, class Arraylike>
@@ -970,7 +1031,7 @@ inline bool
 FillArgumentsFromArraylike(JSContext* cx, Args& args, const Arraylike& arraylike)
 {
     uint32_t len = arraylike.length();
-    if (!args.init(len))
+    if (!args.init(cx, len))
         return false;
 
     for (uint32_t i = 0; i < len; i++)
@@ -1049,7 +1110,7 @@ struct DefaultHasher<AbstractFramePtr> {
 // entries that must be scanned through, and to avoid the headaches of
 // maintaining a cache for each compartment and invalidating stale cache entries
 // in the presence of cross-compartment calls.
-class LiveSavedFrameCache : public JS::Traceable
+class LiveSavedFrameCache
 {
   public:
     using FramePtr = mozilla::Variant<AbstractFramePtr, jit::CommonFrameLayout*>;
@@ -1057,9 +1118,9 @@ class LiveSavedFrameCache : public JS::Traceable
   private:
     struct Entry
     {
-        FramePtr                    framePtr;
-        jsbytecode*                 pc;
-        RelocatablePtr<SavedFrame*> savedFrame;
+        FramePtr             framePtr;
+        jsbytecode*          pc;
+        HeapPtr<SavedFrame*> savedFrame;
 
         Entry(FramePtr& framePtr, jsbytecode* pc, SavedFrame* savedFrame)
           : framePtr(framePtr)
@@ -1102,7 +1163,7 @@ class LiveSavedFrameCache : public JS::Traceable
     }
 
     static mozilla::Maybe<FramePtr> getFramePtr(FrameIter& iter);
-    static void trace(LiveSavedFrameCache* cache, JSTracer* trc);
+    void trace(JSTracer* trc);
 
     void find(JSContext* cx, FrameIter& frameIter, MutableHandleSavedFrame frame) const;
     bool insert(JSContext* cx, FramePtr& framePtr, jsbytecode* pc, HandleSavedFrame savedFrame);
@@ -1155,12 +1216,6 @@ class Activation
     Activation* prev_;
     Activation* prevProfiling_;
 
-    // Counter incremented by JS_SaveFrameChain on the top-most activation and
-    // decremented by JS_RestoreFrameChain. If > 0, ScriptFrameIter should stop
-    // iterating when it reaches this activation (if GO_THROUGH_SAVED is not
-    // set).
-    size_t savedFrameChain_;
-
     // Counter incremented by JS::HideScriptedCaller and decremented by
     // JS::UnhideScriptedCaller. If > 0 for the top activation,
     // DescribeScriptedCaller will return null instead of querying that
@@ -1181,7 +1236,7 @@ class Activation
     Rooted<SavedFrame*> asyncStack_;
 
     // Value of asyncCause to be attached to asyncStack_.
-    RootedString asyncCause_;
+    const char* asyncCause_;
 
     // True if the async call was explicitly requested, e.g. via
     // callFunctionWithAsyncStack.
@@ -1233,17 +1288,6 @@ class Activation
         return (WasmActivation*)this;
     }
 
-    void saveFrameChain() {
-        savedFrameChain_++;
-    }
-    void restoreFrameChain() {
-        MOZ_ASSERT(savedFrameChain_ > 0);
-        savedFrameChain_--;
-    }
-    bool hasSavedFrameChain() const {
-        return savedFrameChain_ > 0;
-    }
-
     void hideScriptedCaller() {
         hideScriptedCallerCount_++;
     }
@@ -1263,7 +1307,7 @@ class Activation
         return asyncStack_;
     }
 
-    JSString* asyncCause() {
+    const char* asyncCause() const {
         return asyncCause_;
     }
 
@@ -1312,7 +1356,7 @@ class InterpreterActivation : public Activation
     inline void popInlineFrame(InterpreterFrame* frame);
 
     inline bool resumeGeneratorFrame(HandleFunction callee, HandleValue newTarget,
-                                     HandleObject scopeChain);
+                                     HandleObject envChain);
 
     InterpreterFrame* current() const {
         return regs_.fp();
@@ -1385,24 +1429,14 @@ class JitActivation : public Activation
 {
     uint8_t* prevJitTop_;
     JitActivation* prevJitActivation_;
-    JSContext* prevJitJSContext_;
     bool active_;
-
-    // The lazy link stub reuse the frame pushed for calling a function as an
-    // exit frame. In a few cases, such as after calls from asm.js, we might
-    // have an entry frame followed by an exit frame. This pattern can be
-    // assimilated as a fake exit frame (unwound frame), in which case we skip
-    // marking during a GC. To ensure that we do mark the stack as expected we
-    // have to keep a flag set by the LazyLink VM function to safely mark the
-    // stack if a GC happens during the link phase.
-    bool isLazyLinkExitFrame_;
 
     // Rematerialized Ion frames which has info copied out of snapshots. Maps
     // frame pointers (i.e. jitTop) to a vector of rematerializations of all
     // inline frames associated with that frame.
     //
     // This table is lazily initialized by calling getRematerializedFrame.
-    typedef Vector<RematerializedFrame*> RematerializedFrameVector;
+    typedef GCVector<RematerializedFrame*> RematerializedFrameVector;
     typedef HashMap<uint8_t*, RematerializedFrameVector> RematerializedFrameTable;
     RematerializedFrameTable* rematerializedFrames_;
 
@@ -1460,9 +1494,6 @@ class JitActivation : public Activation
     }
     static size_t offsetOfPrevJitTop() {
         return offsetof(JitActivation, prevJitTop_);
-    }
-    static size_t offsetOfPrevJitJSContext() {
-        return offsetof(JitActivation, prevJitJSContext_);
     }
     static size_t offsetOfPrevJitActivation() {
         return offsetof(JitActivation, prevJitActivation_);
@@ -1532,14 +1563,6 @@ class JitActivation : public Activation
     // Unregister the bailout data when the frame is reconstructed.
     void cleanBailoutData();
 
-    // Return the bailout information if it is registered.
-    bool isLazyLinkExitFrame() const { return isLazyLinkExitFrame_; }
-
-    // Register the bailout data when it is constructed.
-    void setLazyLinkExitFrame(bool isExitFrame) {
-        isLazyLinkExitFrame_ = isExitFrame;
-    }
-
     static size_t offsetOfLastProfilingFrame() {
         return offsetof(JitActivation, lastProfilingFrame_);
     }
@@ -1581,9 +1604,6 @@ class JitActivationIterator : public ActivationIterator
         settle();
         return *this;
     }
-
-    // Returns the bottom and top addresses of the current JitActivation.
-    void jitStackRange(uintptr_t*& min, uintptr_t*& end);
 };
 
 } // namespace jit
@@ -1641,30 +1661,27 @@ class InterpreterFrameIterator
 // all kinds of jit code.
 class WasmActivation : public Activation
 {
-    wasm::Module& module_;
     WasmActivation* prevWasm_;
-    WasmActivation* prevWasmForModule_;
     void* entrySP_;
     void* resumePC_;
     uint8_t* fp_;
     wasm::ExitReason exitReason_;
 
   public:
-    WasmActivation(JSContext* cx, wasm::Module& module);
+    explicit WasmActivation(JSContext* cx);
     ~WasmActivation();
 
-    wasm::Module& module() const { return module_; }
     WasmActivation* prevWasm() const { return prevWasm_; }
 
     bool isProfiling() const {
         return true;
     }
 
-    // Returns a pointer to the base of the innermost stack frame of asm.js code
+    // Returns a pointer to the base of the innermost stack frame of wasm code
     // in this activation.
     uint8_t* fp() const { return fp_; }
 
-    // Returns the reason why asm.js code called out of asm.js code.
+    // Returns the reason why wasm code called out of wasm code.
     wasm::ExitReason exitReason() const { return exitReason_; }
 
     // Read by JIT code:
@@ -1686,11 +1703,6 @@ class WasmActivation : public Activation
 // different modes of compiled code.
 //
 // FrameIter is parameterized by what it includes in the stack iteration:
-//  - The SavedOption controls whether FrameIter stops when it finds an
-//    activation that was set aside via JS_SaveFrameChain (and not yet restored
-//    by JS_RestoreFrameChain). (Hopefully this will go away.)
-//  - The ContextOption determines whether the iteration will view frames from
-//    all JSContexts or just the given JSContext. (Hopefully this will go away.)
 //  - When provided, the optional JSPrincipal argument will cause FrameIter to
 //    only show frames in globals whose JSPrincipals are subsumed (via
 //    JSSecurityCallbacks::subsume) by the given JSPrincipal.
@@ -1698,7 +1710,7 @@ class WasmActivation : public Activation
 // Additionally, there are derived FrameIter types that automatically skip
 // certain frames:
 //  - ScriptFrameIter only shows frames that have an associated JSScript
-//    (currently everything other than asm.js stack frames). When !hasScript(),
+//    (currently everything other than wasm stack frames). When !hasScript(),
 //    clients must stick to the portion of the
 //    interface marked below.
 //  - NonBuiltinScriptFrameIter additionally filters out builtin (self-hosted)
@@ -1706,8 +1718,6 @@ class WasmActivation : public Activation
 class FrameIter
 {
   public:
-    enum SavedOption { STOP_AT_SAVED, GO_THROUGH_SAVED };
-    enum ContextOption { CURRENT_CONTEXT, ALL_CONTEXTS };
     enum DebuggerEvalOption { FOLLOW_DEBUGGER_EVAL_PREV_LINK,
                               IGNORE_DEBUGGER_EVAL_PREV_LINK };
     enum State { DONE, INTERP, JIT, WASM };
@@ -1717,8 +1727,6 @@ class FrameIter
     struct Data
     {
         JSContext * cx_;
-        SavedOption         savedOption_;
-        ContextOption       contextOption_;
         DebuggerEvalOption  debuggerEvalOption_;
         JSPrincipals *      principals_;
 
@@ -1733,15 +1741,13 @@ class FrameIter
         unsigned ionInlineFrameNo_;
         wasm::FrameIterator wasmFrames_;
 
-        Data(JSContext* cx, SavedOption savedOption, ContextOption contextOption,
-             DebuggerEvalOption debuggerEvalOption, JSPrincipals* principals);
+        Data(JSContext* cx, DebuggerEvalOption debuggerEvalOption, JSPrincipals* principals);
         Data(const Data& other);
     };
 
-    MOZ_IMPLICIT FrameIter(JSContext* cx, SavedOption = STOP_AT_SAVED);
-    FrameIter(JSContext* cx, ContextOption, SavedOption,
-              DebuggerEvalOption = FOLLOW_DEBUGGER_EVAL_PREV_LINK);
-    FrameIter(JSContext* cx, ContextOption, SavedOption, DebuggerEvalOption, JSPrincipals*);
+    explicit FrameIter(JSContext* cx,
+                       DebuggerEvalOption = FOLLOW_DEBUGGER_EVAL_PREV_LINK);
+    FrameIter(JSContext* cx, DebuggerEvalOption, JSPrincipals*);
     FrameIter(const FrameIter& iter);
     MOZ_IMPLICIT FrameIter(const Data& data);
     MOZ_IMPLICIT FrameIter(AbstractFramePtr frame);
@@ -1772,6 +1778,7 @@ class FrameIter
     inline bool hasCachedSavedFrame() const;
     inline void setHasCachedSavedFrame();
 
+    ScriptSource* scriptSource() const;
     const char* filename() const;
     const char16_t* displayURL() const;
     unsigned computeLine(uint32_t* column = nullptr) const;
@@ -1792,10 +1799,10 @@ class FrameIter
 
     // The function |calleeTemplate()| returns either the function from which
     // the current |callee| was cloned or the |callee| if it can be read. As
-    // long as we do not have to investigate the scope chain or build a new
-    // frame, we should prefer to use |calleeTemplate| instead of |callee|, as
-    // requesting the |callee| might cause the invalidation of the frame. (see
-    // js::Lambda)
+    // long as we do not have to investigate the environment chain or build a
+    // new frame, we should prefer to use |calleeTemplate| instead of
+    // |callee|, as requesting the |callee| might cause the invalidation of
+    // the frame. (see js::Lambda)
     JSFunction* calleeTemplate() const;
     JSFunction* callee(JSContext* cx) const;
 
@@ -1810,7 +1817,7 @@ class FrameIter
     Value       unaliasedActual(unsigned i, MaybeCheckAliasing = CHECK_ALIASING) const;
     template <class Op> inline void unaliasedForEachActual(JSContext* cx, Op op);
 
-    JSObject*  scopeChain(JSContext* cx) const;
+    JSObject*  environmentChain(JSContext* cx) const;
     CallObject& callObj(JSContext* cx) const;
 
     bool        hasArgsObj() const;
@@ -1878,27 +1885,17 @@ class ScriptFrameIter : public FrameIter
     }
 
   public:
-    explicit ScriptFrameIter(JSContext* cx, SavedOption savedOption = STOP_AT_SAVED)
-      : FrameIter(cx, savedOption)
+    explicit ScriptFrameIter(JSContext* cx,
+                             DebuggerEvalOption debuggerEvalOption = FOLLOW_DEBUGGER_EVAL_PREV_LINK)
+      : FrameIter(cx, debuggerEvalOption)
     {
         settle();
     }
 
     ScriptFrameIter(JSContext* cx,
-                    ContextOption cxOption,
-                    SavedOption savedOption,
-                    DebuggerEvalOption debuggerEvalOption = FOLLOW_DEBUGGER_EVAL_PREV_LINK)
-      : FrameIter(cx, cxOption, savedOption, debuggerEvalOption)
-    {
-        settle();
-    }
-
-    ScriptFrameIter(JSContext* cx,
-                    ContextOption cxOption,
-                    SavedOption savedOption,
                     DebuggerEvalOption debuggerEvalOption,
                     JSPrincipals* prin)
-      : FrameIter(cx, cxOption, savedOption, debuggerEvalOption, prin)
+      : FrameIter(cx, debuggerEvalOption, prin)
     {
         settle();
     }
@@ -1931,35 +1928,23 @@ class NonBuiltinFrameIter : public FrameIter
 
   public:
     explicit NonBuiltinFrameIter(JSContext* cx,
-                                 FrameIter::SavedOption opt = FrameIter::STOP_AT_SAVED)
-      : FrameIter(cx, opt)
+                                 FrameIter::DebuggerEvalOption debuggerEvalOption =
+                                 FrameIter::FOLLOW_DEBUGGER_EVAL_PREV_LINK)
+      : FrameIter(cx, debuggerEvalOption)
     {
         settle();
     }
 
     NonBuiltinFrameIter(JSContext* cx,
-                        FrameIter::ContextOption contextOption,
-                        FrameIter::SavedOption savedOption,
-                        FrameIter::DebuggerEvalOption debuggerEvalOption =
-                        FrameIter::FOLLOW_DEBUGGER_EVAL_PREV_LINK)
-      : FrameIter(cx, contextOption, savedOption, debuggerEvalOption)
-    {
-        settle();
-    }
-
-    NonBuiltinFrameIter(JSContext* cx,
-                        FrameIter::ContextOption contextOption,
-                        FrameIter::SavedOption savedOption,
                         FrameIter::DebuggerEvalOption debuggerEvalOption,
                         JSPrincipals* principals)
-      : FrameIter(cx, contextOption, savedOption, debuggerEvalOption, principals)
+      : FrameIter(cx, debuggerEvalOption, principals)
     {
         settle();
     }
 
     NonBuiltinFrameIter(JSContext* cx, JSPrincipals* principals)
-        : FrameIter(cx, FrameIter::ALL_CONTEXTS, FrameIter::GO_THROUGH_SAVED,
-                    FrameIter::FOLLOW_DEBUGGER_EVAL_PREV_LINK, principals)
+      : FrameIter(cx, FrameIter::FOLLOW_DEBUGGER_EVAL_PREV_LINK, principals)
     {
         settle();
     }
@@ -1982,29 +1967,17 @@ class NonBuiltinScriptFrameIter : public ScriptFrameIter
 
   public:
     explicit NonBuiltinScriptFrameIter(JSContext* cx,
-                                       ScriptFrameIter::SavedOption opt =
-                                       ScriptFrameIter::STOP_AT_SAVED)
-      : ScriptFrameIter(cx, opt)
+                                       ScriptFrameIter::DebuggerEvalOption debuggerEvalOption =
+                                       ScriptFrameIter::FOLLOW_DEBUGGER_EVAL_PREV_LINK)
+      : ScriptFrameIter(cx, debuggerEvalOption)
     {
         settle();
     }
 
     NonBuiltinScriptFrameIter(JSContext* cx,
-                              ScriptFrameIter::ContextOption contextOption,
-                              ScriptFrameIter::SavedOption savedOption,
-                              ScriptFrameIter::DebuggerEvalOption debuggerEvalOption =
-                              ScriptFrameIter::FOLLOW_DEBUGGER_EVAL_PREV_LINK)
-      : ScriptFrameIter(cx, contextOption, savedOption, debuggerEvalOption)
-    {
-        settle();
-    }
-
-    NonBuiltinScriptFrameIter(JSContext* cx,
-                              ScriptFrameIter::ContextOption contextOption,
-                              ScriptFrameIter::SavedOption savedOption,
                               ScriptFrameIter::DebuggerEvalOption debuggerEvalOption,
                               JSPrincipals* principals)
-      : ScriptFrameIter(cx, contextOption, savedOption, debuggerEvalOption, principals)
+      : ScriptFrameIter(cx, debuggerEvalOption, principals)
     {
         settle();
     }
@@ -2024,12 +1997,22 @@ class NonBuiltinScriptFrameIter : public ScriptFrameIter
  * Blindly iterate over all frames in the current thread's stack. These frames
  * can be from different contexts and compartments, so beware.
  */
-class AllFramesIter : public ScriptFrameIter
+class AllFramesIter : public FrameIter
 {
   public:
     explicit AllFramesIter(JSContext* cx)
-      : ScriptFrameIter(cx, ScriptFrameIter::ALL_CONTEXTS, ScriptFrameIter::GO_THROUGH_SAVED,
-                        ScriptFrameIter::IGNORE_DEBUGGER_EVAL_PREV_LINK)
+      : FrameIter(cx, ScriptFrameIter::IGNORE_DEBUGGER_EVAL_PREV_LINK)
+    {}
+};
+
+/* Iterates over all script frame in the current thread's stack.
+ * See also AllFramesIter and ScriptFrameIter.
+ */
+class AllScriptFramesIter : public ScriptFrameIter
+{
+  public:
+    explicit AllScriptFramesIter(JSContext* cx)
+      : ScriptFrameIter(cx, ScriptFrameIter::IGNORE_DEBUGGER_EVAL_PREV_LINK)
     {}
 };
 

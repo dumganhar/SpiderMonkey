@@ -34,6 +34,10 @@ from ..testing import (
 
 class TreeMetadata(object):
     """Base class for all data being captured."""
+    __slots__ = ()
+
+    def to_dict(self):
+        return {k.lower(): getattr(self, k) for k in self.DICT_ATTRS}
 
 
 class ContextDerived(TreeMetadata):
@@ -44,13 +48,15 @@ class ContextDerived(TreeMetadata):
     """
 
     __slots__ = (
-        'objdir',
-        'relativedir',
+        'context_main_path',
         'context_all_paths',
-        'context_path',
-        'srcdir',
-        'topobjdir',
         'topsrcdir',
+        'topobjdir',
+        'relativedir',
+        'srcdir',
+        'objdir',
+        'config',
+        '_context',
     )
 
     def __init__(self, context):
@@ -155,9 +161,10 @@ class XPIDLFile(ContextDerived):
     """Describes an XPIDL file to be compiled."""
 
     __slots__ = (
-        'add_to_manifest',
-        'basename',
         'source_path',
+        'basename',
+        'module',
+        'add_to_manifest',
     )
 
     def __init__(self, context, source, module, add_to_manifest):
@@ -198,22 +205,6 @@ class Defines(BaseDefines):
 
 class HostDefines(BaseDefines):
     pass
-
-class TestHarnessFiles(ContextDerived):
-    """Sandbox container object for TEST_HARNESS_FILES,
-    which is a HierarchicalStringList.
-
-    We need an object derived from ContextDerived for use in the backend, so
-    this object fills that role. It just has a reference to the underlying
-    HierarchicalStringList, which is created when parsing TEST_HARNESS_FILES.
-    """
-    __slots__ = ('srcdir_files', 'srcdir_pattern_files', 'objdir_files')
-
-    def __init__(self, context, srcdir_files, srcdir_pattern_files, objdir_files):
-        ContextDerived.__init__(self, context)
-        self.srcdir_files = srcdir_files
-        self.srcdir_pattern_files = srcdir_pattern_files
-        self.objdir_files = objdir_files
 
 class IPDLFile(ContextDerived):
     """Describes an individual .ipdl source file."""
@@ -319,9 +310,14 @@ class LinkageWrongKindError(Exception):
     """Error thrown when trying to link objects of the wrong kind"""
 
 
+class LinkageMultipleRustLibrariesError(Exception):
+    """Error thrown when trying to link multiple Rust libraries to an object"""
+
+
 class Linkable(ContextDerived):
     """Generic context derived container object for programs and libraries"""
     __slots__ = (
+        'cxx_link',
         'lib_defines',
         'linked_libraries',
         'linked_system_libs',
@@ -329,6 +325,7 @@ class Linkable(ContextDerived):
 
     def __init__(self, context):
         ContextDerived.__init__(self, context)
+        self.cxx_link = False
         self.linked_libraries = []
         self.linked_system_libs = []
         self.lib_defines = Defines(context, {})
@@ -340,7 +337,16 @@ class Linkable(ContextDerived):
                 'Linkable.link_library() does not take components.')
         if obj.KIND != self.KIND:
             raise LinkageWrongKindError('%s != %s' % (obj.KIND, self.KIND))
+        # Linking multiple Rust libraries into an object would result in
+        # multiple copies of the Rust standard library, as well as linking
+        # errors from duplicate symbols.
+        if isinstance(obj, RustLibrary) and any(isinstance(l, RustLibrary)
+                                                for l in self.linked_libraries):
+            raise LinkageMultipleRustLibrariesError("Cannot link multiple Rust libraries into %s",
+                                                    self)
         self.linked_libraries.append(obj)
+        if obj.cxx_link:
+            self.cxx_link = True
         obj.refs.append(self)
 
     def link_system_library(self, lib):
@@ -369,6 +375,13 @@ class BaseProgram(Linkable):
     """
     __slots__ = ('program')
 
+    DICT_ATTRS = {
+        'install_target',
+        'KIND',
+        'program',
+        'relobjdir',
+    }
+
     def __init__(self, context, program, is_unit_test=False):
         Linkable.__init__(self, context)
 
@@ -377,6 +390,9 @@ class BaseProgram(Linkable):
             program += bin_suffix
         self.program = program
         self.is_unit_test = is_unit_test
+
+    def __repr__(self):
+        return '<%s: %s/%s>' % (type(self).__name__, self.relobjdir, self.program)
 
 
 class Program(BaseProgram):
@@ -427,6 +443,9 @@ class BaseLibrary(Linkable):
 
         self.refs = []
 
+    def __repr__(self):
+        return '<%s: %s/%s>' % (type(self).__name__, self.relobjdir, self.lib_name)
+
 
 class Library(BaseLibrary):
     """Context derived container object for a library"""
@@ -455,6 +474,40 @@ class StaticLibrary(Library):
         self.no_expand_lib = no_expand_lib
 
 
+class RustLibrary(StaticLibrary):
+    """Context derived container object for a static library"""
+    __slots__ = (
+        'cargo_file',
+        'crate_type',
+        'dependencies',
+        'deps_path',
+    )
+
+    def __init__(self, context, basename, cargo_file, crate_type, dependencies, **args):
+        StaticLibrary.__init__(self, context, basename, **args)
+        self.cargo_file = cargo_file
+        self.crate_type = crate_type
+        # We need to adjust our naming here because cargo replaces '-' in
+        # package names defined in Cargo.toml with underscores in actual
+        # filenames. But we need to keep the basename consistent because
+        # many other things in the build system depend on that.
+        assert self.crate_type == 'staticlib'
+        self.lib_name = '%s%s%s' % (context.config.lib_prefix,
+                                     basename.replace('-', '_'),
+                                     context.config.lib_suffix)
+        self.dependencies = dependencies
+        # cargo creates several directories and places its build artifacts
+        # in those directories.  The directory structure depends not only
+        # on the target, but also what sort of build we are doing.
+        rust_build_kind = 'release'
+        if context.config.substs.get('MOZ_DEBUG'):
+            rust_build_kind = 'debug'
+        build_dir = mozpath.join(context.config.substs['RUST_TARGET'],
+                                 rust_build_kind)
+        self.import_name = mozpath.join(build_dir, self.lib_name)
+        self.deps_path = mozpath.join(build_dir, 'deps')
+
+
 class SharedLibrary(Library):
     """Context derived container object for a shared library"""
     __slots__ = (
@@ -463,12 +516,21 @@ class SharedLibrary(Library):
         'symbols_file',
     )
 
+    DICT_ATTRS = {
+        'basename',
+        'import_name',
+        'install_target',
+        'lib_name',
+        'relobjdir',
+        'soname',
+    }
+
     FRAMEWORK = 1
     COMPONENT = 2
     MAX_VARIANT = 3
 
     def __init__(self, context, basename, real_name=None, is_sdk=False,
-            soname=None, variant=None, symbols_file=False):
+                 soname=None, variant=None, symbols_file=False):
         assert(variant in range(1, self.MAX_VARIANT) or variant is None)
         Library.__init__(self, context, basename, real_name, is_sdk)
         self.variant = variant
@@ -497,12 +559,19 @@ class SharedLibrary(Library):
         else:
             self.soname = self.lib_name
 
-        if not symbols_file:
+        if symbols_file is False:
+            # No symbols file.
             self.symbols_file = None
-        elif context.config.substs['OS_TARGET'] == 'WINNT':
-            self.symbols_file = '%s.def' % self.lib_name
+        elif symbols_file is True:
+            # Symbols file with default name.
+            if context.config.substs['OS_TARGET'] == 'WINNT':
+                self.symbols_file = '%s.def' % self.lib_name
+            else:
+                self.symbols_file = '%s.symbols' % self.lib_name
         else:
-            self.symbols_file = '%s.symbols' % self.lib_name
+            # Explicitly provided name.
+            self.symbols_file = symbols_file
+
 
 
 class ExternalLibrary(object):
@@ -548,6 +617,10 @@ class TestManifest(ContextDerived):
         # Set of files provided by an external mechanism.
         'external_installs',
 
+        # Set of files required by multiple test directories, whose installation
+        # will be resolved when running tests.
+        'deferred_installs',
+
         # The full path of this manifest file.
         'path',
 
@@ -589,6 +662,7 @@ class TestManifest(ContextDerived):
         self.pattern_installs = []
         self.tests = []
         self.external_installs = set()
+        self.deferred_installs = set()
 
 
 class LocalInclude(ContextDerived):
@@ -787,7 +861,7 @@ class FinalTargetFiles(ContextDerived):
     this object fills that role. It just has a reference to the underlying
     HierarchicalStringList, which is created when parsing FINAL_TARGET_FILES.
     """
-    __slots__ = ('files', 'target')
+    __slots__ = ('files')
 
     def __init__(self, sandbox, files):
         ContextDerived.__init__(self, sandbox)
@@ -803,14 +877,47 @@ class FinalTargetPreprocessedFiles(ContextDerived):
     HierarchicalStringList, which is created when parsing
     FINAL_TARGET_PP_FILES.
     """
-    __slots__ = ('files', 'target')
+    __slots__ = ('files')
 
     def __init__(self, sandbox, files):
         ContextDerived.__init__(self, sandbox)
         self.files = files
 
 
-class TestingFiles(FinalTargetFiles):
+class ObjdirFiles(ContextDerived):
+    """Sandbox container object for OBJDIR_FILES, which is a
+    HierarchicalStringList.
+    """
+    __slots__ = ('files')
+
+    def __init__(self, sandbox, files):
+        ContextDerived.__init__(self, sandbox)
+        self.files = files
+
+    @property
+    def install_target(self):
+        return ''
+
+
+class ObjdirPreprocessedFiles(ContextDerived):
+    """Sandbox container object for OBJDIR_PP_FILES, which is a
+    HierarchicalStringList.
+    """
+    __slots__ = ('files')
+
+    def __init__(self, sandbox, files):
+        ContextDerived.__init__(self, sandbox)
+        self.files = files
+
+    @property
+    def install_target(self):
+        return ''
+
+
+class TestHarnessFiles(FinalTargetFiles):
+    """Sandbox container object for TEST_HARNESS_FILES,
+    which is a HierarchicalStringList.
+    """
     @property
     def install_target(self):
         return '_tests'
@@ -842,22 +949,35 @@ class BrandingFiles(FinalTargetFiles):
         return 'dist/branding'
 
 
+class SdkFiles(FinalTargetFiles):
+    """Sandbox container object for SDK_FILES, which is a
+    HierarchicalStringList.
+
+    We need an object derived from ContextDerived for use in the backend, so
+    this object fills that role. It just has a reference to the underlying
+    HierarchicalStringList, which is created when parsing SDK_FILES.
+    """
+    @property
+    def install_target(self):
+        return 'dist/sdk'
+
+
 class GeneratedFile(ContextDerived):
     """Represents a generated file."""
 
     __slots__ = (
         'script',
         'method',
-        'output',
+        'outputs',
         'inputs',
         'flags',
     )
 
-    def __init__(self, context, script, method, output, inputs, flags=()):
+    def __init__(self, context, script, method, outputs, inputs, flags=()):
         ContextDerived.__init__(self, context)
         self.script = script
         self.method = method
-        self.output = output
+        self.outputs = outputs if isinstance(outputs, tuple) else (outputs,)
         self.inputs = inputs
         self.flags = flags
 
@@ -978,6 +1098,7 @@ class ChromeManifestEntry(ContextDerived):
     """Represents a chrome.manifest entry."""
 
     __slots__ = (
+        'path',
         'entry',
     )
 

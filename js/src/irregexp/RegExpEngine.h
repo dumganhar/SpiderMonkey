@@ -130,7 +130,7 @@ FOR_EACH_REG_EXP_TREE_TYPE(FORWARD_DECLARE)
 
 // InfallibleVector is like Vector, but all its methods are infallible (they
 // crash on OOM). We use this class instead of Vector to avoid a ton of
-// MOZ_WARN_UNUSED_RESULT warnings in irregexp code (imported from V8).
+// MOZ_MUST_USE warnings in irregexp code (imported from V8).
 template<typename T, size_t N>
 class InfallibleVector
 {
@@ -153,6 +153,7 @@ class InfallibleVector
     T popCopy() { return vector_.popCopy(); }
 
     T* begin() { return vector_.begin(); }
+    const T* begin() const { return vector_.begin(); }
 
     T& operator[](size_t index) { return vector_[index]; }
     const T& operator[](size_t index) const { return vector_[index]; }
@@ -1525,7 +1526,7 @@ class Analysis : public NodeVisitor
         MOZ_ASSERT(error_message_ != nullptr);
         return error_message_;
     }
-    void fail(const char* error_message) {
+    void failASCII(const char* error_message) {
         error_message_ = error_message;
     }
 

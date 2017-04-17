@@ -1,3 +1,4 @@
+# coding: utf-8
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -12,6 +13,7 @@ import shutil
 import string
 import sys
 import tempfile
+import textwrap
 
 from mozfile.mozfile import NamedTemporaryFile
 from mozunit import (
@@ -24,12 +26,16 @@ from mozbuild.util import (
     FileAvoidWrite,
     group_unified_files,
     hash_file,
+    indented_repr,
     memoize,
     memoized_property,
     pair,
     resolve_target_to_make,
     MozbuildDeletionError,
     HierarchicalStringList,
+    EnumString,
+    EnumStringComparisonError,
+    ListWithAction,
     StrictOrderingOnAppendList,
     StrictOrderingOnAppendListWithFlagsFactory,
     TypedList,
@@ -410,6 +416,70 @@ class TestStrictOrderingOnAppendList(unittest.TestCase):
             l2 += list(l)
         # Adding a StrictOrderingOnAppendList to another shouldn't throw
         l2 += l
+
+
+class TestListWithAction(unittest.TestCase):
+    def setUp(self):
+        self.action = lambda a: (a, id(a))
+
+    def assertSameList(self, expected, actual):
+        self.assertEqual(len(expected), len(actual))
+        for idx, item in enumerate(actual):
+            self.assertEqual(item, expected[idx])
+
+    def test_init(self):
+        l = ListWithAction(action=self.action)
+        self.assertEqual(len(l), 0)
+        original = ['a', 'b', 'c']
+        l = ListWithAction(['a', 'b', 'c'], action=self.action)
+        expected = map(self.action, original)
+        self.assertSameList(expected, l)
+
+        with self.assertRaises(ValueError):
+            ListWithAction('abc', action=self.action)
+
+        with self.assertRaises(ValueError):
+            ListWithAction()
+
+    def test_extend(self):
+        l = ListWithAction(action=self.action)
+        original = ['a', 'b']
+        l.extend(original)
+        expected = map(self.action, original)
+        self.assertSameList(expected, l)
+
+        with self.assertRaises(ValueError):
+            l.extend('ab')
+
+    def test_slicing(self):
+        l = ListWithAction(action=self.action)
+        original = ['a', 'b']
+        l[:] = original
+        expected = map(self.action, original)
+        self.assertSameList(expected, l)
+
+        with self.assertRaises(ValueError):
+            l[:] = 'ab'
+
+    def test_add(self):
+        l = ListWithAction(action=self.action)
+        original = ['a', 'b']
+        l2 = l + original
+        expected = map(self.action, original)
+        self.assertSameList(expected, l2)
+
+        with self.assertRaises(ValueError):
+            l + 'abc'
+
+    def test_iadd(self):
+        l = ListWithAction(action=self.action)
+        original = ['a', 'b']
+        l += original
+        expected = map(self.action, original)
+        self.assertSameList(expected, l)
+
+        with self.assertRaises(ValueError):
+            l += 'abc'
 
 
 class TestStrictOrderingOnAppendListWithFlagsFactory(unittest.TestCase):
@@ -795,6 +865,59 @@ class TestMisc(unittest.TestCase):
             }),
             'before abc between a b c after'
         )
+
+class TestEnumString(unittest.TestCase):
+    def test_string(self):
+        CompilerType = EnumString.subclass('msvc', 'gcc', 'clang', 'clang-cl')
+
+        type = CompilerType('msvc')
+        self.assertEquals(type, 'msvc')
+        self.assertNotEquals(type, 'gcc')
+        self.assertNotEquals(type, 'clang')
+        self.assertNotEquals(type, 'clang-cl')
+        self.assertIn(type, ('msvc', 'clang-cl'))
+        self.assertNotIn(type, ('gcc', 'clang'))
+
+        with self.assertRaises(EnumStringComparisonError):
+            self.assertEquals(type, 'foo')
+
+        with self.assertRaises(EnumStringComparisonError):
+            self.assertNotEquals(type, 'foo')
+
+        with self.assertRaises(EnumStringComparisonError):
+            self.assertIn(type, ('foo', 'gcc'))
+
+        with self.assertRaises(ValueError):
+            type = CompilerType('foo')
+
+
+class TestIndentedRepr(unittest.TestCase):
+    def test_indented_repr(self):
+        data = textwrap.dedent(r'''
+        {
+            'a': 1,
+            'b': b'abc',
+            b'c': 'xyz',
+            'd': False,
+            'e': {
+                'a': 1,
+                'b': b'2',
+                'c': '3',
+            },
+            'f': [
+                1,
+                b'2',
+                '3',
+            ],
+            'pile_of_bytes': b'\xf0\x9f\x92\xa9',
+            'pile_of_poo': '💩',
+            'special_chars': '\\\'"\x08\n\t',
+            'with_accents': 'éàñ',
+        }''').lstrip()
+
+        obj = eval(data)
+
+        self.assertEqual(indented_repr(obj), data)
 
 
 if __name__ == '__main__':

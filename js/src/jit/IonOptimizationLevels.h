@@ -21,7 +21,7 @@ namespace jit {
 enum class OptimizationLevel : uint8_t
 {
     Normal,
-    AsmJS,
+    Wasm,
     Count,
     DontCompile
 };
@@ -35,8 +35,8 @@ OptimizationLevelString(OptimizationLevel level)
         return "Optimization_DontCompile";
       case OptimizationLevel::Normal:
         return "Optimization_Normal";
-      case OptimizationLevel::AsmJS:
-        return "Optimization_AsmJS";
+      case OptimizationLevel::Wasm:
+        return "Optimization_Wasm";
       case OptimizationLevel::Count:;
     }
     MOZ_CRASH("Invalid OptimizationLevel");
@@ -134,6 +134,13 @@ class OptimizationInfo
     // Default compiler warmup threshold, unless it is overridden.
     static const uint32_t CompilerWarmupThreshold = 1000;
 
+    // How many invocations or loop iterations are needed before small functions
+    // are compiled.
+    uint32_t compilerSmallFunctionWarmUpThreshold_;
+
+    // Default small function compiler warmup threshold, unless it is overridden.
+    static const uint32_t CompilerSmallFunctionWarmupThreshold = 100;
+
     // How many invocations or loop iterations are needed before calls
     // are inlined, as a fraction of compilerWarmUpThreshold.
     double inliningWarmUpThresholdFactor_;
@@ -147,7 +154,7 @@ class OptimizationInfo
     { }
 
     void initNormalOptimizationInfo();
-    void initAsmjsOptimizationInfo();
+    void initWasmOptimizationInfo();
 
     OptimizationLevel level() const {
         return level_;
@@ -213,6 +220,10 @@ class OptimizationInfo
 
     bool eliminateRedundantChecksEnabled() const {
         return eliminateRedundantChecks_;
+    }
+
+    bool flowAliasAnalysisEnabled() const {
+        return !JitOptions.disableFlowAA;
     }
 
     IonRegisterAllocator registerAllocator() const {

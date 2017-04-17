@@ -30,7 +30,7 @@ ToBooleanSlow(JS::HandleValue v);
 
 /* DO NOT CALL THIS.  Use JS::ToNumber. */
 extern JS_PUBLIC_API(bool)
-ToNumberSlow(JSContext* cx, JS::Value v, double* dp);
+ToNumberSlow(JSContext* cx, JS::HandleValue v, double* dp);
 
 /* DO NOT CALL THIS. Use JS::ToInt8. */
 extern JS_PUBLIC_API(bool)
@@ -400,9 +400,9 @@ ToIntWidth(double d)
 inline int32_t
 ToInt32(double d)
 {
-    // clang crashes compiling this when targeting arm-darwin:
+    // clang crashes compiling this when targeting arm:
     // https://llvm.org/bugs/show_bug.cgi?id=22974
-#if defined (__arm__) && defined (__GNUC__) && !defined(__APPLE__)
+#if defined (__arm__) && defined (__GNUC__) && !defined(__clang__)
     int32_t i;
     uint32_t    tmp0;
     uint32_t    tmp1;

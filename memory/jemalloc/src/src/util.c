@@ -14,6 +14,7 @@
 		malloc_write("<jemalloc>: Unreachable code reached\n");	\
 		abort();						\
 	}								\
+	unreachable();							\
 } while (0)
 
 #define	not_implemented() do {						\
@@ -48,15 +49,19 @@ static void
 wrtmessage(void *cbopaque, const char *s)
 {
 
-#ifdef SYS_write
+#if defined(JEMALLOC_HAVE_SYSCALL) && defined(SYS_write)
 	/*
 	 * Use syscall(2) rather than write(2) when possible in order to avoid
 	 * the possibility of memory allocation within libc.  This is necessary
 	 * on FreeBSD; most operating systems do not have this problem though.
+	 *
+	 * syscall() returns long or int, depending on platform, so capture the
+	 * unused result in the widest plausible type to avoid compiler
+	 * warnings.
 	 */
-	UNUSED int result = syscall(SYS_write, STDERR_FILENO, s, strlen(s));
+	UNUSED long result = syscall(SYS_write, STDERR_FILENO, s, strlen(s));
 #else
-	UNUSED int result = write(STDERR_FILENO, s, strlen(s));
+	UNUSED ssize_t result = write(STDERR_FILENO, s, strlen(s));
 #endif
 }
 
@@ -86,7 +91,7 @@ buferror(int err, char *buf, size_t buflen)
 
 #ifdef _WIN32
 	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, err, 0,
-	    (LPSTR)buf, buflen, NULL);
+	    (LPSTR)buf, (DWORD)buflen, NULL);
 	return (0);
 #elif defined(__GLIBC__) && defined(_GNU_SOURCE)
 	char *b = strerror_r(err, buf, buflen);
@@ -310,10 +315,9 @@ x2s(uintmax_t x, bool alt_form, bool uppercase, char *s, size_t *slen_p)
 	return (s);
 }
 
-int
+size_t
 malloc_vsnprintf(char *str, size_t size, const char *format, va_list ap)
 {
-	int ret;
 	size_t i;
 	const char *f;
 
@@ -404,6 +408,8 @@ malloc_vsnprintf(char *str, size_t size, const char *format, va_list ap)
 			int prec = -1;
 			int width = -1;
 			unsigned char len = '?';
+			char *s;
+			size_t slen;
 
 			f++;
 			/* Flags. */
@@ -494,8 +500,6 @@ malloc_vsnprintf(char *str, size_t size, const char *format, va_list ap)
 			}
 			/* Conversion specifier. */
 			switch (*f) {
-				char *s;
-				size_t slen;
 			case '%':
 				/* %% */
 				APPEND_C(*f);
@@ -581,20 +585,19 @@ malloc_vsnprintf(char *str, size_t size, const char *format, va_list ap)
 		str[i] = '\0';
 	else
 		str[size - 1] = '\0';
-	ret = i;
 
 #undef APPEND_C
 #undef APPEND_S
 #undef APPEND_PADDED_S
 #undef GET_ARG_NUMERIC
-	return (ret);
+	return (i);
 }
 
 JEMALLOC_FORMAT_PRINTF(3, 4)
-int
+size_t
 malloc_snprintf(char *str, size_t size, const char *format, ...)
 {
-	int ret;
+	size_t ret;
 	va_list ap;
 
 	va_start(ap, format);

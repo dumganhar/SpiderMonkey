@@ -93,6 +93,7 @@ def read_from_gyp(config, path, output, vars, non_unified_sources = set()):
         b'parallel': False,
         b'generator_flags': {},
         b'build_files': [path],
+        b'root_targets': None,
     }
 
     # Files that gyp_chromium always includes
@@ -106,7 +107,7 @@ def read_from_gyp(config, path, output, vars, non_unified_sources = set()):
         gyp.Load([path], format=b'mozbuild',
             default_variables=str_vars,
             includes=includes,
-            depth=encode(mozpath.dirname(path)),
+            depth=encode(chrome_src),
             params=params)
 
     # Process all targets from the given gyp files and its dependencies.
@@ -217,7 +218,7 @@ def read_from_gyp(config, path, output, vars, non_unified_sources = set()):
                         # We may be getting make variable references out of the
                         # gyp data, and we don't want those in emitted data, so
                         # substitute them with their actual value.
-                        f = expand_variables(f, config.substs)
+                        f = expand_variables(f, config.substs).split()
                         if not f:
                             continue
                         # the result may be a string or a list.

@@ -166,11 +166,15 @@ AllocationIntegrityState::check(bool populateSafepoints)
                 // instruction reuses its input register for an output.
                 LInstructionReverseIterator riter = block->rbegin(ins);
                 riter++;
-                checkIntegrity(block, *riter, vreg, **alloc, populateSafepoints);
+                if (!checkIntegrity(block, *riter, vreg, **alloc, populateSafepoints))
+                    return false;
 
                 while (!worklist.empty()) {
                     IntegrityItem item = worklist.popCopy();
-                    checkIntegrity(item.block, *item.block->rbegin(), item.vreg, item.alloc, populateSafepoints);
+                    if (!checkIntegrity(item.block, *item.block->rbegin(), item.vreg, item.alloc,
+                                        populateSafepoints)) {
+                        return false;
+                    }
                 }
             }
         }
@@ -479,6 +483,9 @@ RegisterAllocator::init()
     if (!insData.init(mir, graph.numInstructions()))
         return false;
 
+    if (!entryPositions.reserve(graph.numBlocks()) || !exitPositions.reserve(graph.numBlocks()))
+        return false;
+
     for (size_t i = 0; i < graph.numBlocks(); i++) {
         LBlock* block = graph.getBlock(i);
         for (LInstructionIterator ins = block->begin(); ins != block->end(); ins++)
@@ -487,6 +494,15 @@ RegisterAllocator::init()
             LPhi* phi = block->getPhi(j);
             insData[phi->id()] = phi;
         }
+
+        CodePosition entry = block->numPhis() != 0
+                             ? CodePosition(block->getPhi(0)->id(), CodePosition::INPUT)
+                             : inputOf(block->firstInstructionWithId());
+        CodePosition exit = outputOf(block->lastInstructionWithId());
+
+        MOZ_ASSERT(block->mir()->id() == i);
+        entryPositions.infallibleAppend(entry);
+        exitPositions.infallibleAppend(exit);
     }
 
     return true;
@@ -495,11 +511,24 @@ RegisterAllocator::init()
 LMoveGroup*
 RegisterAllocator::getInputMoveGroup(LInstruction* ins)
 {
+    MOZ_ASSERT(!ins->fixReuseMoves());
     if (ins->inputMoves())
         return ins->inputMoves();
 
     LMoveGroup* moves = LMoveGroup::New(alloc());
     ins->setInputMoves(moves);
+    ins->block()->insertBefore(ins, moves);
+    return moves;
+}
+
+LMoveGroup*
+RegisterAllocator::getFixReuseMoveGroup(LInstruction* ins)
+{
+    if (ins->fixReuseMoves())
+        return ins->fixReuseMoves();
+
+    LMoveGroup* moves = LMoveGroup::New(alloc());
+    ins->setFixReuseMoves(moves);
     ins->block()->insertBefore(ins, moves);
     return moves;
 }
@@ -520,7 +549,7 @@ RegisterAllocator::getMoveGroupAfter(LInstruction* ins)
 void
 RegisterAllocator::dumpInstructions()
 {
-#ifdef DEBUG
+#ifdef JS_JITSPEW
     fprintf(stderr, "Instructions:\n");
 
     for (size_t blockIndex = 0; blockIndex < graph.numBlocks(); blockIndex++) {
@@ -581,5 +610,5 @@ RegisterAllocator::dumpInstructions()
         }
     }
     fprintf(stderr, "\n");
-#endif // DEBUG
+#endif // JS_JITSPEW
 }

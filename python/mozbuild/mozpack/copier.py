@@ -6,6 +6,7 @@ from __future__ import absolute_import
 
 import os
 import stat
+import sys
 
 from mozpack.errors import errors
 from mozpack.files import (
@@ -18,6 +19,7 @@ from collections import (
     Counter,
     OrderedDict,
 )
+import concurrent.futures as futures
 
 
 class FileRegistry(object):
@@ -322,9 +324,9 @@ class FileCopier(FileRegistry):
                     os.mkdir(d)
 
             if not os.access(d, os.W_OK):
-                umask = os.umask(0077)
+                umask = os.umask(0o077)
                 os.umask(umask)
-                os.chmod(d, 0777 & ~umask)
+                os.chmod(d, 0o777 & ~umask)
 
         if isinstance(remove_unaccounted, FileRegistry):
             existing_files = set(os.path.normpath(os.path.join(destination, p))
@@ -375,10 +377,30 @@ class FileCopier(FileRegistry):
         dest_files = set()
 
         # Install files.
-        for p, f in self:
-            destfile = os.path.normpath(os.path.join(destination, p))
+        #
+        # Creating/appending new files on Windows/NTFS is slow. So we use a
+        # thread pool to speed it up significantly. The performance of this
+        # loop is so critical to common build operations on Linux that the
+        # overhead of the thread pool is worth avoiding, so we have 2 code
+        # paths. We also employ a low water mark to prevent thread pool
+        # creation if number of files is too small to benefit.
+        copy_results = []
+        if sys.platform == 'win32' and len(self) > 100:
+            with futures.ThreadPoolExecutor(4) as e:
+                fs = []
+                for p, f in self:
+                    destfile = os.path.normpath(os.path.join(destination, p))
+                    fs.append((destfile, e.submit(f.copy, destfile, skip_if_older)))
+
+            copy_results = [(destfile, f.result) for destfile, f in fs]
+        else:
+            for p, f in self:
+                destfile = os.path.normpath(os.path.join(destination, p))
+                copy_results.append((destfile, f.copy(destfile, skip_if_older)))
+
+        for destfile, copy_result in copy_results:
             dest_files.add(destfile)
-            if f.copy(destfile, skip_if_older):
+            if copy_result:
                 result.updated_files.add(destfile)
             else:
                 result.existing_files.add(destfile)
@@ -390,7 +412,7 @@ class FileCopier(FileRegistry):
                 if os.name == 'nt' and not os.access(f, os.W_OK):
                     # It doesn't matter what we set permissions to since we
                     # will remove this file shortly.
-                    os.chmod(f, 0600)
+                    os.chmod(f, 0o600)
 
                 os.remove(f)
                 result.removed_files.add(f)
@@ -432,7 +454,7 @@ class FileCopier(FileRegistry):
                     if e.errno in (errno.EPERM, errno.EACCES):
                         # Permissions may not allow deletion. So ensure write
                         # access is in place before attempting to rmdir again.
-                        os.chmod(d, 0700)
+                        os.chmod(d, 0o700)
                         os.rmdir(d)
                     else:
                         raise
@@ -462,7 +484,13 @@ class Jarrer(FileRegistry, BaseFile):
         self.compress = compress
         self.optimize = optimize
         self._preload = []
+        self._compress_options = {}  # Map path to compress boolean option.
         FileRegistry.__init__(self)
+
+    def add(self, path, content, compress=None):
+        FileRegistry.add(self, path, content)
+        if compress is not None:
+            self._compress_options[path] = compress
 
     def copy(self, dest, skip_if_older=True):
         '''
@@ -518,12 +546,14 @@ class Jarrer(FileRegistry, BaseFile):
         with JarWriter(fileobj=dest, compress=self.compress,
                        optimize=self.optimize) as jar:
             for path, file in self:
+                compress = self._compress_options.get(path, self.compress)
+
                 if path in old_contents:
-                    deflater = DeflaterDest(old_contents[path], self.compress)
+                    deflater = DeflaterDest(old_contents[path], compress)
                 else:
-                    deflater = DeflaterDest(compress=self.compress)
+                    deflater = DeflaterDest(compress=compress)
                 file.copy(deflater, skip_if_older)
-                jar.add(path, deflater.deflater, mode=file.mode)
+                jar.add(path, deflater.deflater, mode=file.mode, compress=compress)
             if self._preload:
                 jar.preload(self._preload)
 

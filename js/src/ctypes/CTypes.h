@@ -6,6 +6,7 @@
 #ifndef ctypes_CTypes_h
 #define ctypes_CTypes_h
 
+#include "mozilla/Sprintf.h"
 #include "mozilla/Vector.h"
 
 #include "ffi.h"
@@ -64,7 +65,7 @@ void
 AppendUInt(mozilla::Vector<T, N, AP>& v, unsigned n)
 {
   char array[16];
-  size_t alen = JS_snprintf(array, 16, "%u", n);
+  size_t alen = SprintfLiteral(array, "%u", n);
   size_t vlen = v.length();
   if (!v.resize(vlen + alen))
     return;
@@ -177,7 +178,7 @@ GetDeflatedUTF8StringLength(JSContext* maybecx, const CharT* chars,
                             size_t charsLength);
 
 template <typename CharT>
-bool
+MOZ_MUST_USE bool
 DeflateStringToUTF8Buffer(JSContext* maybecx, const CharT* src, size_t srclen,
                           char* dst, size_t* dstlenp);
 
@@ -211,6 +212,7 @@ enum ErrorNum {
 enum ABICode {
   ABI_DEFAULT,
   ABI_STDCALL,
+  ABI_THISCALL,
   ABI_WINAPI,
   INVALID_ABI
 };
@@ -280,8 +282,8 @@ struct FieldHashPolicy : DefaultHasher<JSFlatString*>
   }
 };
 
-using FieldInfoHash = GCHashMap<js::RelocatablePtr<JSFlatString*>,
-                                FieldInfo, FieldHashPolicy, SystemAllocPolicy>;
+using FieldInfoHash = GCHashMap<js::HeapPtr<JSFlatString*>, FieldInfo,
+                                FieldHashPolicy, SystemAllocPolicy>;
 
 // Descriptor of ABI, return type, argument types, and variadicity for a
 // FunctionType.
@@ -316,7 +318,7 @@ struct FunctionInfo
 // Parameters necessary for invoking a JS function from a C closure.
 struct ClosureInfo
 {
-  JSRuntime* rt;
+  JSContext* cx;
   JS::Heap<JSObject*> closureObj;  // CClosure object
   JS::Heap<JSObject*> typeObj;     // FunctionType describing the C function
   JS::Heap<JSObject*> thisObj;     // 'this' object to use for the JS function call
@@ -326,8 +328,8 @@ struct ClosureInfo
 
   // Anything conditionally freed in the destructor should be initialized to
   // nullptr here.
-  explicit ClosureInfo(JSRuntime* runtime)
-    : rt(runtime)
+  explicit ClosureInfo(JSContext* context)
+    : cx(context)
     , errResult(nullptr)
     , closure(nullptr)
   {}
@@ -442,18 +444,19 @@ enum Int64FunctionSlot {
 
 namespace CType {
   JSObject* Create(JSContext* cx, HandleObject typeProto, HandleObject dataProto,
-    TypeCode type, JSString* name, Value size, Value align, ffi_type* ffiType);
+    TypeCode type, JSString* name, HandleValue size, HandleValue align,
+                   ffi_type* ffiType);
 
   JSObject* DefineBuiltin(JSContext* cx, HandleObject ctypesObj, const char* propName,
     JSObject* typeProto, JSObject* dataProto, const char* name, TypeCode type,
-    Value size, Value align, ffi_type* ffiType);
+    HandleValue size, HandleValue align, ffi_type* ffiType);
 
   bool IsCType(JSObject* obj);
   bool IsCTypeProto(JSObject* obj);
   TypeCode GetTypeCode(JSObject* typeObj);
   bool TypesEqual(JSObject* t1, JSObject* t2);
   size_t GetSize(JSObject* obj);
-  bool GetSafeSize(JSObject* obj, size_t* result);
+  MOZ_MUST_USE bool GetSafeSize(JSObject* obj, size_t* result);
   bool IsSizeDefined(JSObject* obj);
   size_t GetAlignment(JSObject* obj);
   ffi_type* GetFFIType(JSContext* cx, JSObject* obj);
@@ -477,12 +480,12 @@ namespace ArrayType {
 
   JSObject* GetBaseType(JSObject* obj);
   size_t GetLength(JSObject* obj);
-  bool GetSafeLength(JSObject* obj, size_t* result);
+  MOZ_MUST_USE bool GetSafeLength(JSObject* obj, size_t* result);
   UniquePtrFFIType BuildFFIType(JSContext* cx, JSObject* obj);
 } // namespace ArrayType
 
 namespace StructType {
-  bool DefineInternal(JSContext* cx, JSObject* typeObj, JSObject* fieldsObj);
+  MOZ_MUST_USE bool DefineInternal(JSContext* cx, JSObject* typeObj, JSObject* fieldsObj);
 
   const FieldInfoHash* GetFieldInfo(JSObject* obj);
   const FieldInfo* LookupField(JSContext* cx, JSObject* obj, JSFlatString* name);
@@ -504,7 +507,7 @@ namespace FunctionType {
 
 namespace CClosure {
   JSObject* Create(JSContext* cx, HandleObject typeObj, HandleObject fnObj,
-    HandleObject thisObj, Value errVal, PRFuncPtr* fnptr);
+    HandleObject thisObj, HandleValue errVal, PRFuncPtr* fnptr);
 } // namespace CClosure
 
 namespace CData {
@@ -518,9 +521,9 @@ namespace CData {
   bool IsCDataProto(JSObject* obj);
 
   // Attached by JSAPI as the function 'ctypes.cast'
-  bool Cast(JSContext* cx, unsigned argc, Value* vp);
+  MOZ_MUST_USE bool Cast(JSContext* cx, unsigned argc, Value* vp);
   // Attached by JSAPI as the function 'ctypes.getRuntime'
-  bool GetRuntime(JSContext* cx, unsigned argc, Value* vp);
+  MOZ_MUST_USE bool GetRuntime(JSContext* cx, unsigned argc, Value* vp);
 } // namespace CData
 
 namespace Int64 {
