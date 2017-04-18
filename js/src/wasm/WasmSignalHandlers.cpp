@@ -334,8 +334,13 @@ struct macos_x86_context {
 #  define EMULATOR_CONTEXT macos_x86_context
 # elif defined(JS_CPU_ARM)
 struct macos_arm_context {
+#if defined(__aarch64__)
+    arm_thread_state64_t thread;
+    arm_neon_state64_t float_;
+#else
     arm_thread_state_t thread;
     arm_neon_state_t float_;
+#endif
 };
 #  define EMULATOR_CONTEXT macos_arm_context
 # else

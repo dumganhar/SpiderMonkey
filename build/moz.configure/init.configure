@@ -368,6 +368,9 @@ def split_triplet(triplet):
     elif cpu.startswith('sparc') or cpu == 'sun4u':
         canonical_cpu = 'sparc'
         endianness = 'big'
+    elif cpu.startswith('arm64'):
+        canonical_cpu = 'arm64'
+        endianness = 'little'
     elif cpu.startswith('arm'):
         canonical_cpu = 'arm'
         endianness = 'big' if cpu.startswith(('armeb', 'armbe')) else 'little'
@@ -382,6 +385,8 @@ def split_triplet(triplet):
         endianness = 'little'
     else:
         die('Unknown CPU type: %s' % cpu)
+
+    log.info("[cjh]: cpu: " + str(cpu) + ", canonical_cpu: " + canonical_cpu + ", bitness:" + str(CPU_bitness[canonical_cpu]) + ", CPU_bitness:" + str(CPU_bitness))
 
     return namespace(
         alias=triplet,
@@ -424,6 +429,7 @@ def host(value, shell):
 def target(value, host, shell):
     if not value:
         return host
+    log.info("shell: " + str(shell) + ", value:" + str(value))
     return split_triplet(config_sub(shell, value[0]))
 
 
@@ -439,6 +445,7 @@ add_old_configure_assignment('CROSS_COMPILE', cross_compiling)
 
 @depends(target)
 def have_64_bit(target):
+    log.info("[cjh]:----------> target: " + str(target))
     if target.bitness == 64:
         return True
 

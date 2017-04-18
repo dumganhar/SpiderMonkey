@@ -158,17 +158,22 @@ js_option('--with-toolchain-prefix', env='TOOLCHAIN_PREFIX', nargs=1,
 
 @depends('--with-toolchain-prefix', target, host, cross_compiling)
 def toolchain_prefix(value, target, host, cross_compiling):
+    log.info("[cjh]:toolchain_prefix  cross_compiling: " + str(cross_compiling) )
     if value:
+        log.info("[cjh]: toolchain_prefix, return: " + str(value))
         return tuple(value)
     if cross_compiling:
+        log.info("[cjh]: target.toolchain:" + target.toolchain + ", target.alias: " + target.alias)
         return ('%s-' % target.toolchain, '%s-' % target.alias)
 
 @depends(toolchain_prefix, target)
 def first_toolchain_prefix(toolchain_prefix, target):
+    log.info("[cjh]: first_toolchain_prefix: " + str(toolchain_prefix) + ", target:" + str(target))
     # Pass TOOLCHAIN_PREFIX down to the build system if it was given from the
     # command line/environment (in which case there's only one value in the tuple),
     # or when cross-compiling for Android.
     if toolchain_prefix and (target.os == 'Android' or len(toolchain_prefix) == 1):
+        log.debug("[cjh]:first_toolchain_prefix, toolchain_prefix: " + toolchain_prefix[0])
         return toolchain_prefix[0]
 
 set_config('TOOLCHAIN_PREFIX', first_toolchain_prefix)
@@ -270,6 +275,7 @@ def get_compiler_info(compiler, language):
     result = try_preprocess(compiler, language, check)
 
     if not result:
+        log.error("error 1")
         raise FatalCheckError(
             'Unknown compiler or compiler not supported.')
 
@@ -286,6 +292,7 @@ def get_compiler_info(compiler, language):
     try:
         type = CompilerType(data['COMPILER'])
     except:
+        log.error("error 2")
         raise FatalCheckError(
             'Unknown compiler or compiler not supported.')
 
@@ -317,6 +324,7 @@ def get_compiler_info(compiler, language):
 
 @imports(_from='mozbuild.shellutil', _import='quote')
 def check_compiler(compiler, language, target):
+    log.info("[cjh] -----------> check compiler .....")
     info = get_compiler_info(compiler, language)
 
     flags = []
@@ -346,7 +354,7 @@ def check_compiler(compiler, language, target):
     # -std=gnu++11.
     if info.language == 'C++':
         if info.type in ('clang', 'gcc') and info.language_version != 201103:
-            append_flag('-std=gnu++11')
+            append_flag('-std=c++11')
         # MSVC 2015 headers include C++14 features, but don't guard them
         # with appropriate checks.
         if info.type == 'clang-cl' and info.language_version != 201402:
@@ -470,14 +478,19 @@ def default_c_compilers(host_or_target):
 
     @depends(host_or_target, target, toolchain_prefix)
     def default_c_compilers(host_or_target, target, toolchain_prefix):
+        log.info("[cjh]: host_or_target: " + str(host_or_target))
+        log.info("[cjh]: target:" + str(target))
+        log.info("[cjh]: toolchain_prefix:" + str(toolchain_prefix))
         gcc = ('gcc',)
+        clang = ('clang',)
         if toolchain_prefix and host_or_target is target:
             gcc = tuple('%sgcc' % p for p in toolchain_prefix) + gcc
+            clang = tuple('%sclang' % p for p in toolchain_prefix) + clang
 
         if host_or_target.kernel == 'WINNT':
             return ('cl', 'clang-cl') + gcc + ('clang',)
         if host_or_target.kernel == 'Darwin':
-            return ('clang',)
+            return clang
         return gcc + ('clang',)
 
     return default_c_compilers
@@ -526,6 +539,8 @@ def compiler(language, host_or_target, c_compiler=None, other_compiler=None,
     `other_c_compiler` is the result of the `compiler` template for the
     language 'C' for `target`.
     '''
+
+    log.error("------------>>>>>> host: " + str(host) + ", target: " + str(target))
     assert host_or_target in (host, target)
     assert language in ('C', 'C++')
     assert language == 'C' or c_compiler
@@ -601,15 +616,19 @@ def compiler(language, host_or_target, c_compiler=None, other_compiler=None,
     # old-configure complicates things, and for now, we a) can't take the plain
     # result from check_prog as CC/CXX/HOST_CC/HOST_CXX and b) have to let
     # old-configure AC_SUBST it (because it's autoconf doing it, not us)
+    log.info("[cjh] before check compiler ..., var: " + var)
+
     compiler = check_prog('_%s' % var, what=what, progs=default_compilers,
                           input=delayed_getattr(provided_compiler, 'compiler'),
                           paths=toolchain_search_path)
+    log.info("[cjh] after check compiler ...")
 
     @depends(compiler, provided_compiler, compiler_wrapper, host_or_target)
     @checking('whether %s can be used' % what, lambda x: bool(x))
     @imports(_from='mozbuild.shellutil', _import='quote')
     def valid_compiler(compiler, provided_compiler, compiler_wrapper,
                        host_or_target):
+        log.info("[cjh] >>>>>>> valid_compiler ...")
         wrapper = list(compiler_wrapper or ())
         if provided_compiler:
             provided_wrapper = list(provided_compiler.wrapper)
@@ -653,6 +672,8 @@ def compiler(language, host_or_target, c_compiler=None, other_compiler=None,
             info = check_compiler(wrapper + [compiler] + flags, language,
                                   host_or_target)
 
+        log.info("[cjh]: info: " + str(info))
+        log.info("[cjh]: target_cpu: " + info.target_cpu + ", host_or_target:" + str(host_or_target))
         if not info.target_cpu or info.target_cpu != host_or_target.cpu:
             raise FatalCheckError(
                 '%s %s compiler target CPU (%s) does not match --%s CPU (%s)'
@@ -678,6 +699,7 @@ def compiler(language, host_or_target, c_compiler=None, other_compiler=None,
                    host_or_target.endianness))
 
         if info.flags:
+            log.error("error 3")
             raise FatalCheckError(
                 'Unknown compiler or compiler not supported.')
 
@@ -783,7 +805,9 @@ def compiler(language, host_or_target, c_compiler=None, other_compiler=None,
     return valid_compiler
 
 
+log.info("cjh ----> before check c compiler ")
 c_compiler = compiler('C', target)
+log.info("cjh ----> after check c compiler ")
 cxx_compiler = compiler('C++', target, c_compiler=c_compiler)
 host_c_compiler = compiler('C', host, other_compiler=c_compiler)
 host_cxx_compiler = compiler('C++', host, c_compiler=host_c_compiler,

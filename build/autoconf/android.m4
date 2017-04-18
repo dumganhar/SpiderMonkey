@@ -5,6 +5,8 @@ dnl file, You can obtain one at http://mozilla.org/MPL/2.0/.
 AC_DEFUN([MOZ_ANDROID_NDK],
 [
 
+echo "android -----------"
+
 MOZ_ARG_WITH_STRING(android-cxx-stl,
 [  --with-android-cxx-stl=VALUE
                           use the specified C++ STL (libstdc++, libc++)],
@@ -76,13 +78,13 @@ if test "$OS_TARGET" = "Android"; then
         case "$android_cxx_stl" in
         libstdc++)
             # android-ndk-r8b and later
-            ndk_base="$android_ndk/sources/cxx-stl/gnu-libstdc++/$android_gnu_compiler_version"
+            ndk_base="$android_ndk/sources/cxx-stl/gnu-libstdc++/4.9"
             ndk_libs_include="$ndk_base/libs/$ANDROID_CPU_ARCH"
             ndk_libs="$ndk_base/libs/$cpu_arch_dir"
             ndk_include="$ndk_base/include"
 
             if ! test -e "$ndk_libs/libgnustl_static.a"; then
-                AC_MSG_ERROR([Couldn't find path to gnu-libstdc++ in the android ndk])
+                AC_MSG_ERROR([Couldn't find path to gnu-libstdc++ in the android ndk: $ndk_libs/libgnustl_static.a])
             fi
 
             STLPORT_LIBS="-L$ndk_libs -lgnustl_static"

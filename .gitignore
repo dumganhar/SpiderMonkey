@@ -44,16 +44,16 @@ js/src/configure
 # Ignore the entire build-android and build-ios directory
 # Note : to override .gitignore and commit changes to files in this directory
 # use "git commit -f <filename>"
-js/src/build-android/*
-js/src/build-ios/*
-js/src/build-win32/*
-js/src/build-osx/*
-js/src/build-linux/*
-!js/src/build-android/build.sh
-!js/src/build-ios/build.sh
-!js/src/build-win32/build.sh
-!js/src/build-osx/build.sh
-!js/src/build-linux/build.sh
+build-android/*
+build-ios/*
+build-win32/*
+build-osx/*
+build-linux/*
+!build-android/build.sh
+!build-ios/build.sh
+!build-win32/build.sh
+!build-osx/build.sh
+!build-linux/build.sh
 
 # Ignore the Android dist files/directories
 ./include

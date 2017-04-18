@@ -38,6 +38,8 @@ set -x
 host_os=`uname -s | tr "[:upper:]" "[:lower:]"`
 host_arch=`uname -m`
 
+export OLD_CONFIGURE=../js/src/old-configure
+
 build_with_arch()
 {
 
@@ -50,60 +52,58 @@ fi
 rm -rf dist
 rm -f ./config.cache
 
-../configure --with-android-ndk=$NDK_ROOT \
-             --with-android-sdk=$HOME/bin/android-sdk \
-             --with-android-toolchain=$NDK_ROOT/toolchains/${TOOLS_ARCH}-${GCC_VERSION}/prebuilt/${host_os}-${host_arch} \
-             --with-android-version=21 \
-             --enable-application=mobile/android \
-             --with-android-gnu-compiler-version=${GCC_VERSION} \
-             --with-arch=${CPU_ARCH} \
-             --with-android-cxx-stl=libstdc++ \
-             --target=${TARGET_NAME} \
-             --disable-shared-js \
-             --disable-tests \
-             --enable-strip \
-             --enable-install-strip \
-             --disable-debug \
-             --without-intl-api \
-             --with-system-zlib \
-             --disable-threadsafe \
-             --disable-ion --disable-methodjit
+python ../configure.py \
+            --enable-project=js \
+            --with-android-ndk=$NDK_ROOT \
+            --with-android-sdk=$HOME/bin/android-sdk \
+            --with-android-version=21 \
+            --with-android-gnu-compiler-version=${GCC_VERSION} \
+            --with-arch=${CPU_ARCH} \
+            --with-android-cxx-stl=libstdc++ \
+            --target=${TARGET_NAME} \
+            --disable-shared-js \
+            --disable-tests \
+            --enable-strip \
+            --enable-install-strip \
+            --disable-debug \
+            --without-intl-api \
+            --with-system-zlib
 
 # make
-make -j15
+# make -j8
 
-if [[ $develop ]]; then
-    rm ../../../include
-    rm ../../../lib
+# if [[ $develop ]]; then
+#     rm ../../../include
+#     rm ../../../lib
 
-    ln -s -f "$PWD"/dist/include ../../..
-    ln -s -f "$PWD"/dist/lib ../../..
-fi
+#     ln -s -f "$PWD"/dist/include ../../..
+#     ln -s -f "$PWD"/dist/lib ../../..
+# fi
 
-if [[ $release ]]; then
-# copy specific files from dist
-    rm -r "$RELEASE_DIR/include"
-    rm -r "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR"
-    mkdir -p "$RELEASE_DIR/include"
-    cp -RL dist/include/* "$RELEASE_DIR/include/"
-    mkdir -p "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR"
-    cp -L dist/lib/libjs_static.a "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libjs_static.a"
+# if [[ $release ]]; then
+# # copy specific files from dist
+#     rm -r "$RELEASE_DIR/include"
+#     rm -r "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR"
+#     mkdir -p "$RELEASE_DIR/include"
+#     cp -RL dist/include/* "$RELEASE_DIR/include/"
+#     mkdir -p "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR"
+#     cp -L dist/lib/libjs_static.a "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libjs_static.a"
 
-# strip unneeded symbols
-    $HOME/bin/android-ndk/toolchains/${TOOLS_ARCH}-${GCC_VERSION}/prebuilt/${host_os}-${host_arch}/bin/${TOOLNAME_PREFIX}-strip \
-        --strip-unneeded "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libjs_static.a"
-fi
+# # strip unneeded symbols
+#     $HOME/bin/android-ndk/toolchains/${TOOLS_ARCH}-${GCC_VERSION}/prebuilt/${host_os}-${host_arch}/bin/${TOOLNAME_PREFIX}-strip \
+#         --strip-unneeded "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libjs_static.a"
+# fi
 
 }
 
 # Build with armv6
-# TOOLS_ARCH=arm-linux-androideabi
-# TARGET_NAME=arm-linux-androideabi
-# CPU_ARCH=armv6
-# RELEASE_ARCH_DIR=armeabi
-# GCC_VERSION=4.6
-# TOOLNAME_PREFIX=arm-linux-androideabi
-# build_with_arch
+TOOLS_ARCH=arm-linux-androideabi
+TARGET_NAME=arm-linux-androideabi
+CPU_ARCH=armv6
+RELEASE_ARCH_DIR=armeabi
+GCC_VERSION=4.9
+TOOLNAME_PREFIX=arm-linux-androideabi
+build_with_arch
 
 # Build with armv7
 # TOOLS_ARCH=arm-linux-androideabi
@@ -115,13 +115,13 @@ fi
 # build_with_arch
 
 # Build with arm64
-TOOLS_ARCH=aarch64-linux-android
-TARGET_NAME=aarch64-linux-android
-CPU_ARCH=armv8-a
-RELEASE_ARCH_DIR=arm64-v8a
-GCC_VERSION=4.9
-TOOLNAME_PREFIX=aarch64-linux-android
-build_with_arch
+# TOOLS_ARCH=aarch64-linux-android
+# TARGET_NAME=aarch64-linux-android
+# CPU_ARCH=armv8-a
+# RELEASE_ARCH_DIR=arm64-v8a
+# GCC_VERSION=4.9
+# TOOLNAME_PREFIX=aarch64-linux-android
+# build_with_arch
 
 
 # Build with x86
@@ -129,6 +129,6 @@ build_with_arch
 # TARGET_NAME=i686-linux-android
 # CPU_ARCH=i686
 # RELEASE_ARCH_DIR=x86
-# GCC_VERSION=4.6
+# GCC_VERSION=4.9
 # TOOLNAME_PREFIX=i686-linux-android
 # build_with_arch

@@ -127,7 +127,7 @@ def check_prog(var, progs, what=None, input=None, allow_missing=False,
             configure_error('progs must resolve to a list or tuple!')
 
         for prog in value or progs:
-            log.debug('%s: Trying %s', var.lower(), quote(prog))
+            log.info('[cjh]:%s: Trying %s', var.lower(), quote(prog))
             result = find_program(prog, paths)
             if result:
                 return result

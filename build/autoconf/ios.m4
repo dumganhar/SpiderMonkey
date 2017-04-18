@@ -2,107 +2,125 @@ dnl This Source Code Form is subject to the terms of the Mozilla Public
 dnl License, v. 2.0. If a copy of the MPL was not distributed with this
 dnl file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-AC_DEFUN([MOZ_IOS_PATH_PROG],
-[
-changequote({,})
-_prog_name=ifelse($2, {}, `echo $1 | tr "[:upper:]" "[:lower:]"`, $2)
-changequote([,])
-AC_CACHE_CHECK([for $_prog_name in iOS SDK],
-ac_cv_ios_path_$1,
-[
-_path=`xcrun --sdk $ios_sdk --find $_prog_name 2>/dev/null`
-_res=$?
-if test $_res -ne 0; then
-   AC_MSG_ERROR([Could not find '$_prog_name' in the iOS SDK])
-fi
-ac_cv_ios_path_$1=$_path
-])
-$1="${ac_cv_ios_path_$1}$3"
-])
+dnl ========================================================
+dnl = First test to make it work for iOS
+dnl = Xcode >= 4.3.1 required
+dnl ========================================================
 
 AC_DEFUN([MOZ_IOS_SDK],
 [
 
-MOZ_ARG_WITH_STRING(ios-sdk,
-[  --with-ios-sdk=TYPE
-                          Type of iOS SDK to use (iphonesimulator, iphoneos)
-                          and optionally version (like iphoneos8.2)],
-    ios_sdk=$withval)
+MOZ_ARG_WITH_STRING(ios-target,
+[  --with-ios-target=SDK
+                     what target sdk to use, defaults to iPhoneSimulator],
+    ios_target=$withval)
 
-MOZ_ARG_ENABLE_STRING(ios-target,
-                      [  --enable-ios-target=VER (default=8.0)
-                          Set the minimum iOS version needed at runtime],
-                      [_IOS_TARGET=$enableval])
-_IOS_TARGET_DEFAULT=8.0
+MOZ_ARG_WITH_STRING(ios-min-version,
+[  --with-ios-min-version=VER
+                          deploy target version, defaults to 6.0],
+    ios_deploy_version=$withval,
+    ios_deploy_version=6.0)
 
-case "$target" in
-arm*-apple-darwin*)
-    if test -z "$ios_sdk" -o "$ios_sdk" = "yes"; then
-       ios_sdk=iphoneos
+MOZ_ARG_WITH_STRING(ios-arch,
+[  --with-ios-arch=ARCH
+                   iOS architecture, defaults to armv7 for device, x86 for simulator],
+    ios_arch=$withval)
+
+
+case "$ios_target" in
+iPhoneOS|iPhoneSimulator)
+    dnl test for Xcode 4.3+
+    if ! test -d `xcode-select --print-path` ; then
+        AC_MSG_ERROR([You must install Xcode first from the App Store])
     fi
-    case "$ios_sdk" in
-         iphoneos*)
-                ios_target_arg="-miphoneos-version-min"
-                ;;
-         *)
-                AC_MSG_ERROR([Only 'iphoneos' SDKs are valid when targeting iOS device, don't know what to do with '$ios_sdk'.])
-                ;;
-    esac
-    ;;
-*-apple-darwin*)
-    ios_target_arg="-mios-simulator-version-min"
-    case "$ios_sdk" in
-         # Empty SDK is okay, this might be an OS X desktop build.
-         ""|iphonesimulator*)
-                ;;
-         # Default to iphonesimulator
-         yes)
-                ios_sdk=iphonesimulator
-                ;;
-         *)
-                AC_MSG_ERROR([Only 'iphonesimulator' SDKs are valid when targeting iOS simulator.])
-                ;;
-    esac
-    ;;
+
+    if test "$ios_target" == "iPhoneSimulator" ; then
+        if test "$ios_arch" == "i386"; then
+            dnl force ios_arch to i386 for simulator
+            CPU_ARCH=i386
+            ios_arch=i386
+        fi
+
+        if test "$ios_arch" == "x86_64"; then
+            dnl force ios_arch to x86_64 for simulator
+            CPU_ARCH=x86_64
+            ios_arch=x86_64
+        fi
+
+        target_name=x86
+        target=i386-darwin
+        TARGET_CPU=i386
+    else
+        if test "$ios_arch" == "armv7"; then
+            CPU_ARCH=armv7
+            ios_arch=armv7
+            TARGET_CPU=armv7
+        fi
+
+        if test "$ios_arch" == "armv7s"; then
+            CPU_ARCH=armv7s
+            ios_arch=armv7s
+            TARGET_CPU=armv7s
+        fi
+
+        if test "$ios_arch" == "armv64"; then
+            CPU_ARCH=arm64
+            ios_arch=arm64
+            TARGET_CPU=arm64
+        fi
+
+        target_name=arm
+        target=arm-darwin
+        DISABLE_YARR_JIT=1
+        AC_SUBST(DISABLE_YARR_JIT)
+    fi
+    target_os=darwin
+
+    xcode_base="`xcode-select --print-path`/Platforms"
+    ios_sdk_root=""
+    ios_toolchain="`xcode-select --print-path`/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+
+    dnl test to see if the actual sdk exists
+    ios_sdk_root="$xcode_base"/$ios_target.platform/Developer/SDKs/$ios_target.sdk
+    if ! test -d "$ios_sdk_root" ; then
+        AC_MSG_ERROR([Invalid SDK version])
+    fi
+
+    dnl set the compilers
+    export AS="xcrun -sdk iphoneos as"
+    export CC="xcrun -sdk iphoneos clang"
+    export CXX="xcrun -sdk iphoneos clang++"
+    export CPP="xcrun -sdk iphoneos clang++ -E"
+    export LD="xcrun -sdk iphoneos ld"
+    export AR="xcrun -sdk iphoneos ar"
+    export RANLIB="xcrun -sdk iphoneos ranlib"
+    export STRIP="xcrun -sdk iphoneos strip"
+    export LDFLAGS="-isysroot $ios_sdk_root -arch $ios_arch -v"
+
+    if test "$ios_target" == "iPhoneSimulator" ; then
+        CFLAGS="-isysroot $ios_sdk_root -arch $ios_arch -mios-simulator-version-min=$ios_deploy_version -I$ios_sdk_root/usr/include -pipe -Wno-implicit-int -Wno-return-type"
+    else
+        CFLAGS="-isysroot $ios_sdk_root -arch $ios_arch -miphoneos-version-min=$ios_deploy_version -I$ios_sdk_root/usr/include -pipe -Wno-implicit-int -Wno-return-type"
+    fi
+    
+    CXXFLAGS="-stdlib=libc++ -std=c++11 $CFLAGS"
+    CPPFLAGS="$CFLAGS"
+
+    dnl prevent cross compile section from using these flags as host flags
+    if test -z "$HOST_CPPFLAGS" ; then
+        HOST_CPPFLAGS=" "
+    fi
+    if test -z "$HOST_CFLAGS" ; then
+        HOST_CFLAGS=" "
+    fi
+    if test -z "$HOST_CXXFLAGS" ; then
+        HOST_CXXFLAGS=" "
+    fi
+    if test -z "$HOST_LDFLAGS" ; then
+        HOST_LDFLAGS=" "
+    fi
+
+    AC_DEFINE(IPHONEOS)
+    export CROSS_COMPILE=1
 esac
-
-
-if test -n "$ios_sdk"; then
-   if test -z "$_IOS_TARGET"; then
-      _IOS_TARGET=$_IOS_TARGET_DEFAULT
-      ios_target_arg="${ios_target_arg}=${_IOS_TARGET}"
-   fi
-   # Ensure that xcrun knows where this SDK is.
-   ios_sdk_path=`xcrun --sdk $ios_sdk --show-sdk-path 2>/dev/null`
-   _ret=$?
-   if test $_ret -ne 0; then
-      AC_MSG_ERROR([iOS SDK '$ios_sdk' could not be found.])
-   fi
-   MOZ_IOS=1
-   export HOST_CC=clang
-   export HOST_CXX=clang++
-   # Add isysroot, arch, and ios target arguments
-   case "$target_cpu" in
-        arm*)
-                ARGS="-arch armv7"
-                ;;
-        *)
-                # Unfortunately simulator builds need this.
-                export CROSS_COMPILE=1
-                ;;
-   esac
-   ARGS=" $ARGS -isysroot $ios_sdk_path $ios_target_arg"
-   # Now find our tools
-   MOZ_IOS_PATH_PROG(CC, clang, $ARGS)
-   MOZ_IOS_PATH_PROG(CXX, clang++, $ARGS)
-   export CPP="$CC -E"
-   export LD="$CXX"
-   MOZ_IOS_PATH_PROG(AR)
-   MOZ_IOS_PATH_PROG(AS, as, $ARGS)
-   MOZ_IOS_PATH_PROG(OTOOL)
-   MOZ_IOS_PATH_PROG(STRIP)
-   export PKG_CONFIG_PATH=${ios_sdk_path}/usr/lib/pkgconfig/
-fi
-
-AC_SUBST(MOZ_IOS)
 ])

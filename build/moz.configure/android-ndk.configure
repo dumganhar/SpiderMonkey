@@ -43,6 +43,7 @@ add_old_configure_assignment('android_version', android_version)
 
 @depends('--with-android-ndk', build_project)
 def ndk(value, build_project):
+    log.info("[cjh]: ndk: value: " + str(value) + ", build_project:" + str(build_project))
     if build_project == 'mobile/android' and not value:
         die('You must specify --with-android-ndk=/path/to/ndk when '
             'building mobile/android')
@@ -84,6 +85,7 @@ def android_platform(target, android_version, ndk):
         die("Android platform directory not found. With the current "
             "configuration, it should be in %s" % platform_dir)
 
+    log.info("[cjh]---> Android platform dir: " + platform_dir)
     return platform_dir
 
 add_old_configure_assignment('android_platform', android_platform)
@@ -101,6 +103,7 @@ def extra_toolchain_flags(platform_dir):
 @imports(_from='os.path', _import='isdir')
 @imports(_from='mozbuild.shellutil', _import='quote')
 def android_toolchain(target, host, ndk, toolchain, gnu_compiler_version):
+    log.info("[cjh]: android_toolchain, toolchain: " + str(toolchain) + ", compiler version: " + str(gnu_compiler_version))
     if not ndk:
         return
     if toolchain:
@@ -122,7 +125,7 @@ def android_toolchain(target, host, ndk, toolchain, gnu_compiler_version):
         for version in gnu_compiler_version or ['4.9', '4.8', '4.7']:
             toolchain = toolchain_format % (ndk, target_base, version,
                                             host.kernel.lower(), host.cpu)
-            log.debug('Trying %s' % quote(toolchain))
+            log.debug('[cjh]: Trying %s' % quote(toolchain))
             if not isdir(toolchain) and host.cpu == 'x86_64':
                 toolchain = toolchain_format % (ndk, target_base, version,
                                                 host.kernel.lower(), 'x86')
@@ -139,6 +142,7 @@ set_config('ANDROID_TOOLCHAIN', android_toolchain)
 
 @depends(target, android_toolchain)
 def android_toolchain_prefix(target, toolchain):
+    log.info("[cjh]: android_toolchain_prefix: target:" + str(target) + ", toolchain: " + str(toolchain))
     if toolchain:
         if target.cpu == 'x86':
             # Ideally, the --target should just have the right x86 variant

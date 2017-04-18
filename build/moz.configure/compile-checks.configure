@@ -25,6 +25,7 @@ def try_compile(includes=None, body='', language='C++', flags=None, check_msg=No
         'C++': cxx_compiler,
     }[language]
 
+    log.info("[cjh]: compile-check.configure: try_compile")
     return compiler.try_compile(includes, body, flags, check_msg, when=when)
 
 
