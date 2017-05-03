@@ -95,11 +95,19 @@ python ../configure.py \
             --disable-shared-js --disable-tests --disable-ion --enable-llvm-hacks \
             --enable-optimize=-O3 --with-thumb=yes --enable-strip --enable-install-strip --without-intl-api --disable-debug
 
-# make -j$cpus
-# if (( $? )) ; then
-#    echo "error when compiling arm64 (iOS version) of the library"
-#    exit
-# fi
+make -j$cpus
+if (( $? )) ; then
+   echo "error when compiling arm64 (iOS version) of the library"
+   exit
+fi
+rm -f ./dist/sdk/lib/libmozglue.a
+cp ./mozglue/build/libmozglue.a ./dist/sdk/lib/
+cp ./js/src/libjs_static.a ./dist/sdk/lib/
+
+# strip
+$STRIP -S ./dist/sdk/lib/libjs_static.a
+$STRIP -S ./dist/sdk/lib/libmozglue.a
+
 # mv js/src/libjs_static.a js/src/libjs_static.arm64.a
 
 # #

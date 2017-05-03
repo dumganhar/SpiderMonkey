@@ -7,9 +7,17 @@ export OLD_CONFIGURE=../js/src/old-configure
 # configure
 python ../configure.py \
             --enable-project=js \
-            --disable-shared-js --disable-tests --enable-llvm-hacks \
-            --enable-optimize=-O3 --with-thumb=yes --enable-strip --enable-install-strip --without-intl-api --disable-debug
+            --enable-optimize=-O3 \
+            --enable-strip \
+            --enable-install-strip \
+            --disable-shared-js \
+            --disable-tests \
+            --disable-debug \
+            --with-thumb=yes \
+            --without-intl-api
+            
 
+            # 
 # make
 xcrun make -j$cpus
 
