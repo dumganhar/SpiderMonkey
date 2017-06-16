@@ -13,114 +13,104 @@ cpus=$(sysctl hw.ncpu | awk '{print $2}')
 
 export OLD_CONFIGURE=../js/src/old-configure
 
-# # remove everything but the static library and this script
-# #ls | grep -v libjs_static.armv7.a | grep -v libjs_static.armv7s.a | grep -v build.sh | xargs rm -rf
+# remove everything but the static library and this script
+ls | grep -v build.sh | xargs rm -rf
 
-# #
-# # create i386 version (simulator)
-# #
-# #../configure --with-ios-target=iPhoneSimulator --with-ios-version=$IOS_SDK --with-ios-min-version=$MIN_IOS_VERSION --disable-shared-js --disable-tests --disable-ion --enable-llvm-hacks --enable-debug
-# ../configure --with-ios-target=iPhoneSimulator --with-ios-version=$IOS_SDK --with-ios-min-version=$MIN_IOS_VERSION --with-ios-arch=i386 \
-#             --disable-shared-js --disable-tests --disable-ion --disable-jm --disable-tm --enable-llvm-hacks --disable-methodjit --disable-monoic --disable-polyic \
-#             --enable-optimize=-O3 --enable-strip --enable-install-strip \
-#             --disable-debug --without-intl-api --disable-threadsafe \
-#             --disable-gcgenerational --disable-exact-rooting
-# make -j$cpus
-# if (( $? )) ; then
-#     echo "error when compiling i386 (iOS Simulator) version of the library"
-#     exit
-# fi
-# mv js/src/libjs_static.a js/src/libjs_static.i386.a
+#
+# create i386 version (simulator)
+#
+python ../configure.py \
+            --enable-project=js \
+            --with-toolchain-prefix="`xcode-select --print-path`/Toolchains/XcodeDefault.xctoolchain/usr/bin/" \
+            --target=i386-apple-darwin \
+            --with-ios-target=iPhoneSimulator --with-ios-min-version=$MIN_IOS_VERSION --with-ios-arch=i386 \
+            --disable-shared-js --disable-tests --disable-ion --disable-debug \
+            --enable-optimize=-O3 --enable-strip --enable-install-strip --with-thumb=no --without-intl-api
+            
+make -j$cpus
+if (( $? )) ; then
+    echo "error when compiling i386 (iOS Simulator) version of the library"
+    exit
+fi
+mkdir -p ./dist/temp/
+mv ./mozglue/build/libmozglue.a ./dist/temp/libmozglue.i386.a
+mv ./js/src/libjs_static.a ./dist/temp/libjs_static.i386.a
 
-# #
-# # create x86_64 version (simulator)
-# #
-# #../configure --with-ios-target=iPhoneSimulator --with-ios-version=$IOS_SDK --with-ios-min-version=$MIN_IOS_VERSION --disable-shared-js --disable-tests --disable-ion --enable-llvm-hacks --enable-debug
-# ../configure --with-ios-target=iPhoneSimulator --with-ios-version=$IOS_SDK --with-ios-min-version=$MIN_IOS_VERSION --with-ios-arch=x86_64 \
-#             --disable-shared-js --disable-tests --disable-ion --disable-jm --disable-tm --enable-llvm-hacks --disable-methodjit --disable-monoic --disable-polyic \
-#             --enable-optimize=-O3 --enable-strip --enable-install-strip \
-#             --disable-debug --without-intl-api --disable-threadsafe \
-#             --disable-gcgenerational --disable-exact-rooting
-# make -j$cpus
-# if (( $? )) ; then
-#     echo "error when compiling x86_64 (iOS Simulator) version of the library"
-#     exit
-# fi
-# mv js/src/libjs_static.a js/src/libjs_static.x86_64.a
+#
+# create x86_64 version (simulator)
+#
+python ../configure.py \
+            --enable-project=js \
+            --with-toolchain-prefix="`xcode-select --print-path`/Toolchains/XcodeDefault.xctoolchain/usr/bin/" \
+            --target=x86_64-apple-darwin \
+            --with-ios-target=iPhoneSimulator --with-ios-min-version=$MIN_IOS_VERSION --with-ios-arch=x86_64 \
+            --disable-shared-js --disable-tests --disable-ion --disable-debug \
+            --enable-optimize=-O3 --enable-strip --enable-install-strip --with-thumb=no --without-intl-api
+
+make -j$cpus
+if (( $? )) ; then
+    echo "error when compiling x86_64 (iOS Simulator) version of the library"
+    exit
+fi
+mkdir -p ./dist/temp/
+mv ./mozglue/build/libmozglue.a ./dist/temp/libmozglue.x86_64.a
+mv ./js/src/libjs_static.a ./dist/temp/libjs_static.x86_64.a
 
 #
 # create ios version (armv7)
 #
-# python ../configure.py \
-#             --enable-project=js \
-#             --with-toolchain-prefix="`xcode-select --print-path`/Toolchains/XcodeDefault.xctoolchain/usr/bin/" \
-#             --target=armv7-apple-darwin \
-#             --with-ios-target=iPhoneOS --with-ios-min-version=$MIN_IOS_VERSION --with-ios-arch=armv7 \
-#             --disable-shared-js --disable-tests --disable-ion --enable-llvm-hacks \
-#             --enable-optimize=-O3 --with-thumb=yes --enable-strip --enable-install-strip --without-intl-api --disable-debug \
-            
-# make -j$cpus
-# if (( $? )) ; then
-#     echo "error when compiling armv7 (iOS version) of the library"
-#     exit
-# fi
-# mv js/src/libjs_static.a js/src/libjs_static.armv7.a
+python ../configure.py \
+            --enable-project=js \
+            --with-toolchain-prefix="`xcode-select --print-path`/Toolchains/XcodeDefault.xctoolchain/usr/bin/" \
+            --target=armv7-apple-darwin \
+            --with-ios-target=iPhoneOS --with-ios-min-version=$MIN_IOS_VERSION --with-ios-arch=armv7 \
+            --disable-shared-js --disable-tests --disable-ion --disable-debug \
+            --enable-optimize=-O3 --enable-strip --enable-install-strip --with-thumb=no --without-intl-api
+      
+make -j$cpus
+if (( $? )) ; then
+    echo "error when compiling armv7 (iOS version) of the library"
+    exit
+fi
+mkdir -p ./dist/temp/
+mv ./mozglue/build/libmozglue.a ./dist/temp/libmozglue.armv7.a
+mv ./js/src/libjs_static.a ./dist/temp/libjs_static.armv7.a
 
-
-# #
-# # create ios version (armv7s)
-# #
-
-# #../configure --with-ios-target=iPhoneOS --with-ios-version=$IOS_SDK --with-ios-min-version=$MIN_IOS_VERSION --with-ios-arch=armv7s  --disable-shared-js --disable-tests --disable-ion --disable-jm --disable-tm --enable-llvm-hacks --disable-methodjit --with-thumb=yes --enable-strip --enable-install-strip --disable-monoic --disable-polyic --disable-ion --enable-optimize=-O1
-# ../configure --with-ios-target=iPhoneOS --with-ios-version=$IOS_SDK --with-ios-min-version=$MIN_IOS_VERSION --with-ios-arch=armv7s \
-#             --disable-shared-js --disable-tests --disable-ion --disable-jm --disable-tm --enable-llvm-hacks --disable-methodjit --disable-monoic --disable-polyic --disable-yarr-jit \
-#             --enable-optimize=-O3 --with-thumb=yes --enable-strip --enable-install-strip --without-intl-api --disable-debug --disable-threadsafe \
-#             --disable-gcgenerational --disable-exact-rooting
-# make -j$cpus
-# if (( $? )) ; then
-#     echo "error when compiling armv7s (iOS version) of the library"
-#     exit
-# fi
-# mv js/src/libjs_static.a js/src/libjs_static.armv7s.a
 
 #
 # create ios version (arm64)
 #
-
 python ../configure.py \
             --enable-project=js \
             --with-toolchain-prefix="`xcode-select --print-path`/Toolchains/XcodeDefault.xctoolchain/usr/bin/" \
             --target=arm64-apple-darwin \
             --with-ios-target=iPhoneOS --with-ios-min-version=$MIN_IOS_VERSION --with-ios-arch=arm64 \
-            --disable-shared-js --disable-tests --disable-ion --enable-llvm-hacks \
-            --enable-optimize=-O3 --with-thumb=yes --enable-strip --enable-install-strip --without-intl-api --disable-debug
+            --disable-shared-js --disable-tests --disable-ion --disable-debug \
+            --enable-optimize=-O3 --enable-strip --enable-install-strip --with-thumb=no --without-intl-api
 
 make -j$cpus
 if (( $? )) ; then
    echo "error when compiling arm64 (iOS version) of the library"
    exit
 fi
-rm -f ./dist/sdk/lib/libmozglue.a
-cp ./mozglue/build/libmozglue.a ./dist/sdk/lib/
-cp ./js/src/libjs_static.a ./dist/sdk/lib/
+mkdir -p ./dist/temp/
+mv ./mozglue/build/libmozglue.a ./dist/temp/libmozglue.arm64.a
+mv ./js/src/libjs_static.a ./dist/temp/libjs_static.arm64.a
 
-# strip
-$STRIP -S ./dist/sdk/lib/libjs_static.a
-$STRIP -S ./dist/sdk/lib/libmozglue.a
+#
+# lipo create
+#
 
-# mv js/src/libjs_static.a js/src/libjs_static.arm64.a
-
-# #
-# # lipo create
-# #
-
-# if [ -e js/src/libjs_static.i386.a ] && [ -e js/src/libjs_static.x86_64.a ] && [ -e js/src/libjs_static.armv7.a ] && [ -e js/src/libjs_static.armv7s.a ] && [ -e js/src/libjs_static.arm64.a ] ; then
-#     echo "creating fat version of the library"
-#     $LIPO -create -output libjs_static.a js/src/libjs_static.i386.a js/src/libjs_static.x86_64.a js/src/libjs_static.armv7.a js/src/libjs_static.armv7s.a js/src/libjs_static.arm64.a
-#     # remove debugging info
-#     $STRIP -S libjs_static.a
-#     $LIPO -info libjs_static.a
-# fi
+if [ -e dist/temp/libjs_static.i386.a ] && [ -e dist/temp/libjs_static.x86_64.a ] && [ -e dist/temp/libjs_static.armv7.a ] && [ -e dist/temp/libjs_static.arm64.a ] ; then
+    echo "creating fat version of the library"
+    $LIPO -create -output dist/sdk/libjs_static.a dist/temp/libjs_static.i386.a dist/temp/libjs_static.x86_64.a dist/temp/libjs_static.armv7.a dist/temp/libjs_static.arm64.a
+    $LIPO -create -output dist/sdk/libmozglue.a dist/temp/libmozglue.i386.a dist/temp/libmozglue.x86_64.a dist/temp/libmozglue.armv7.a dist/temp/libmozglue.arm64.a
+    # remove debugging info
+    $STRIP -S dist/sdk/libjs_static.a
+    $STRIP -S dist/sdk/libmozglue.a
+    $LIPO -info dist/sdk/libjs_static.a
+    $LIPO -info dist/sdk/libmozglue.a
+fi
 
 #
 # done

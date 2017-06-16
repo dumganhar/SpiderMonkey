@@ -56,7 +56,7 @@ python ../configure.py \
             --enable-project=js \
             --with-android-ndk=$NDK_ROOT \
             --with-android-sdk=$HOME/bin/android-sdk \
-            --with-android-version=21 \
+            --with-android-version=${ANDROID_VERSION} \
             --with-android-gnu-compiler-version=${GCC_VERSION} \
             --with-arch=${CPU_ARCH} \
             --with-android-cxx-stl=libstdc++ \
@@ -69,30 +69,33 @@ python ../configure.py \
             --without-intl-api \
             --with-system-zlib
 
-# make
-# make -j8
 
-# if [[ $develop ]]; then
-#     rm ../../../include
-#     rm ../../../lib
+make -j8
 
-#     ln -s -f "$PWD"/dist/include ../../..
-#     ln -s -f "$PWD"/dist/lib ../../..
-# fi
+if [[ $develop ]]; then
+    rm ../../../include
+    rm ../../../lib
 
-# if [[ $release ]]; then
-# # copy specific files from dist
-#     rm -r "$RELEASE_DIR/include"
-#     rm -r "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR"
-#     mkdir -p "$RELEASE_DIR/include"
-#     cp -RL dist/include/* "$RELEASE_DIR/include/"
-#     mkdir -p "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR"
-#     cp -L dist/lib/libjs_static.a "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libjs_static.a"
+    ln -s -f "$PWD"/dist/include ../../..
+    ln -s -f "$PWD"/dist/lib ../../..
+fi
 
-# # strip unneeded symbols
-#     $HOME/bin/android-ndk/toolchains/${TOOLS_ARCH}-${GCC_VERSION}/prebuilt/${host_os}-${host_arch}/bin/${TOOLNAME_PREFIX}-strip \
-#         --strip-unneeded "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libjs_static.a"
-# fi
+if [[ $release ]]; then
+# copy specific files from dist
+    rm -r "$RELEASE_DIR/include"
+    rm -r "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR"
+    mkdir -p "$RELEASE_DIR/include"
+    cp -RL dist/include/* "$RELEASE_DIR/include/"
+    mkdir -p "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR"
+    cp -L js/src/libjs_static.a "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libjs_static.a"
+    cp -L dist/sdk/lib/libmozglue.a "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libmozglue.a"
+
+# strip unneeded symbols
+    STRIP=$HOME/bin/android-ndk/toolchains/${TOOLS_ARCH}-${GCC_VERSION}/prebuilt/${host_os}-${host_arch}/bin/${TOOLNAME_PREFIX}-strip
+
+    $STRIP --strip-unneeded "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libjs_static.a"
+    $STRIP --strip-unneeded "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libmozglue.a"
+fi
 
 }
 
@@ -102,33 +105,37 @@ TARGET_NAME=arm-linux-androideabi
 CPU_ARCH=armv6
 RELEASE_ARCH_DIR=armeabi
 GCC_VERSION=4.9
+ANDROID_VERSION=10
 TOOLNAME_PREFIX=arm-linux-androideabi
 build_with_arch
 
 # Build with armv7
-# TOOLS_ARCH=arm-linux-androideabi
-# TARGET_NAME=arm-linux-androideabi
-# CPU_ARCH=armv7-a
-# RELEASE_ARCH_DIR=armeabi-v7a
-# GCC_VERSION=4.9
-# TOOLNAME_PREFIX=arm-linux-androideabi
-# build_with_arch
+TOOLS_ARCH=arm-linux-androideabi
+TARGET_NAME=arm-linux-androideabi
+CPU_ARCH=armv7-a
+RELEASE_ARCH_DIR=armeabi-v7a
+GCC_VERSION=4.9
+ANDROID_VERSION=10
+TOOLNAME_PREFIX=arm-linux-androideabi
+build_with_arch
 
 # Build with arm64
-# TOOLS_ARCH=aarch64-linux-android
-# TARGET_NAME=aarch64-linux-android
-# CPU_ARCH=armv8-a
-# RELEASE_ARCH_DIR=arm64-v8a
-# GCC_VERSION=4.9
-# TOOLNAME_PREFIX=aarch64-linux-android
-# build_with_arch
+TOOLS_ARCH=aarch64-linux-android
+TARGET_NAME=aarch64-linux-android
+CPU_ARCH=armv8-a
+RELEASE_ARCH_DIR=arm64-v8a
+GCC_VERSION=4.9
+ANDROID_VERSION=21
+TOOLNAME_PREFIX=aarch64-linux-android
+build_with_arch
 
 
 # Build with x86
-# TOOLS_ARCH=x86
-# TARGET_NAME=i686-linux-android
-# CPU_ARCH=i686
-# RELEASE_ARCH_DIR=x86
-# GCC_VERSION=4.9
-# TOOLNAME_PREFIX=i686-linux-android
-# build_with_arch
+TOOLS_ARCH=x86
+TARGET_NAME=i686-linux-android
+CPU_ARCH=i686
+RELEASE_ARCH_DIR=x86
+GCC_VERSION=4.9
+ANDROID_VERSION=10
+TOOLNAME_PREFIX=i686-linux-android
+build_with_arch

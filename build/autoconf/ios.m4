@@ -39,17 +39,15 @@ iPhoneOS|iPhoneSimulator)
             dnl force ios_arch to i386 for simulator
             CPU_ARCH=i386
             ios_arch=i386
+            TARGET_CPU=i386
         fi
 
         if test "$ios_arch" == "x86_64"; then
             dnl force ios_arch to x86_64 for simulator
             CPU_ARCH=x86_64
             ios_arch=x86_64
+            TARGET_CPU=x86_64
         fi
-
-        target_name=x86
-        target=i386-darwin
-        TARGET_CPU=i386
     else
         if test "$ios_arch" == "armv7"; then
             CPU_ARCH=armv7
@@ -68,11 +66,6 @@ iPhoneOS|iPhoneSimulator)
             ios_arch=arm64
             TARGET_CPU=arm64
         fi
-
-        target_name=arm
-        target=arm-darwin
-        DISABLE_YARR_JIT=1
-        AC_SUBST(DISABLE_YARR_JIT)
     fi
     target_os=darwin
 

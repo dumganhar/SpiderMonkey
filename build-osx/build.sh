@@ -8,16 +8,13 @@ export OLD_CONFIGURE=../js/src/old-configure
 python ../configure.py \
             --enable-project=js \
             --enable-optimize=-O3 \
-            --enable-strip \
-            --enable-install-strip \
             --disable-shared-js \
             --disable-tests \
             --disable-debug \
-            --with-thumb=yes \
+            --with-thumb=no \
             --without-intl-api
             
 
-            # 
 # make
 xcrun make -j$cpus
 
@@ -28,3 +25,6 @@ cp ./js/src/libjs_static.a ./dist/sdk/lib/
 # strip
 xcrun strip -S ./dist/sdk/lib/libjs_static.a
 xcrun strip -S ./dist/sdk/lib/libmozglue.a
+
+rm -rf ./release-dist
+cp -pr ./dist ./release-dist
