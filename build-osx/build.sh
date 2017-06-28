@@ -26,5 +26,5 @@ cp ./js/src/libjs_static.a ./dist/sdk/lib/
 xcrun strip -S ./dist/sdk/lib/libjs_static.a
 xcrun strip -S ./dist/sdk/lib/libmozglue.a
 
-rm -rf ./release-dist
-cp -pr ./dist ./release-dist
+rm -rf ./dist-osx
+cp -pr ./dist ./dist-osx
