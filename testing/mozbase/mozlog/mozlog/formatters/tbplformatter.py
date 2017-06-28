@@ -117,7 +117,8 @@ class TbplFormatter(BaseFormatter):
 
     def suite_start(self, data):
         self.suite_start_time = data["time"]
-        return "SUITE-START | Running %i tests\n" % len(data["tests"])
+        num_tests = reduce(lambda x, y: x + len(y), data['tests'].itervalues(), 0)
+        return "SUITE-START | Running %i tests\n" % num_tests
 
     def test_start(self, data):
         self.test_start_times[self.test_id(data["test"])] = data["time"]
@@ -138,6 +139,25 @@ class TbplFormatter(BaseFormatter):
                 self.buffer.append(data)
         else:
             return self._format_status(data)
+
+    def assertion_count(self, data):
+        if data["min_expected"] != data["max_expected"]:
+            expected = "%i to %i" % (data["min_expected"],
+                                     data["max_expected"])
+        else:
+            expected = "%i" % data["min_expected"]
+
+        if data["count"] < data["min_expected"]:
+            status, comparison = "TEST-UNEXPECTED-PASS", "is less than"
+        elif data["count"] > data["max_expected"]:
+            status, comparison = "TEST-UNEXPECTED-FAIL", "is more than"
+        elif data["count"] > 0:
+            status, comparison = "TEST-KNOWN-FAIL", "matches"
+        else:
+            return
+
+        return ("%s | %s | assertion count %i %s expected %s assertions\n" %
+                (status, data["test"], data["count"], comparison, expected))
 
     def _format_status(self, data):
         message = "- " + data["message"] if "message" in data else ""

@@ -185,6 +185,9 @@ class LIRGenerator : public LIRGeneratorSpecific
     void visitNullarySharedStub(MNullarySharedStub* ins);
     void visitLambda(MLambda* ins);
     void visitLambdaArrow(MLambdaArrow* ins);
+    void visitSetFunName(MSetFunName* ins);
+    void visitNewLexicalEnvironmentObject(MNewLexicalEnvironmentObject* ins);
+    void visitCopyLexicalEnvironmentObject(MCopyLexicalEnvironmentObject* ins);
     void visitKeepAliveObject(MKeepAliveObject* ins);
     void visitSlots(MSlots* ins);
     void visitElements(MElements* ins);
@@ -328,6 +331,7 @@ class LIRGenerator : public LIRGeneratorSpecific
     void visitGuardSharedTypedArray(MGuardSharedTypedArray* ins);
     void visitCheckReturn(MCheckReturn* ins);
     void visitCheckIsObj(MCheckIsObj* ins);
+    void visitCheckIsCallable(MCheckIsCallable* ins);
     void visitCheckObjCoercible(MCheckObjCoercible* ins);
     void visitDebugCheckSelfHosted(MDebugCheckSelfHosted* ins);
 };

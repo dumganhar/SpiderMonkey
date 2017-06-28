@@ -136,7 +136,7 @@ class JS_FRIEND_API(Wrapper) : public BaseProxyHandler
     static JSObject* New(JSContext* cx, JSObject* obj, const Wrapper* handler,
                          const WrapperOptions& options = WrapperOptions());
 
-    static JSObject* Renew(JSContext* cx, JSObject* existing, JSObject* obj, const Wrapper* handler);
+    static JSObject* Renew(JSObject* existing, JSObject* obj, const Wrapper* handler);
 
     static const Wrapper* wrapperHandler(JSObject* wrapper);
 
@@ -294,7 +294,7 @@ class JS_FRIEND_API(SecurityWrapper) : public Base
     { }
 
     virtual bool enter(JSContext* cx, HandleObject wrapper, HandleId id, Wrapper::Action act,
-                       bool* bp) const override;
+                       bool mayThrow, bool* bp) const override;
 
     virtual bool defineProperty(JSContext* cx, HandleObject wrapper, HandleId id,
                                 Handle<PropertyDescriptor> desc,
@@ -357,6 +357,9 @@ CheckedUnwrap(JSObject* obj, bool stopAtWindowProxy = true);
 // above. This is the checked version of Wrapper::wrappedObject.
 JS_FRIEND_API(JSObject*)
 UnwrapOneChecked(JSObject* obj, bool stopAtWindowProxy = true);
+
+void
+ReportAccessDenied(JSContext* cx);
 
 JS_FRIEND_API(bool)
 IsCrossCompartmentWrapper(JSObject* obj);

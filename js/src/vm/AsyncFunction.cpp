@@ -40,8 +40,11 @@ GlobalObject::initAsyncFunction(JSContext* cx, Handle<GlobalObject*> global)
                                                         proto));
     if (!asyncFunction)
         return false;
-    if (!LinkConstructorAndPrototype(cx, asyncFunction, asyncFunctionProto))
+    if (!LinkConstructorAndPrototype(cx, asyncFunction, asyncFunctionProto,
+                                     JSPROP_PERMANENT | JSPROP_READONLY, JSPROP_READONLY))
+    {
         return false;
+    }
 
     global->setReservedSlot(ASYNC_FUNCTION, ObjectValue(*asyncFunction));
     global->setReservedSlot(ASYNC_FUNCTION_PROTO, ObjectValue(*asyncFunctionProto));
@@ -107,21 +110,18 @@ WrappedAsyncFunction(JSContext* cx, unsigned argc, Value* vp)
 //  the async function's body, replacing `await` with `yield`.  `wrapped` is a
 // function that is visible to the outside, and handles yielded values.
 JSObject*
-js::WrapAsyncFunction(JSContext* cx, HandleFunction unwrapped)
+js::WrapAsyncFunctionWithProto(JSContext* cx, HandleFunction unwrapped, HandleObject proto)
 {
-    MOZ_ASSERT(unwrapped->isStarGenerator());
+    MOZ_ASSERT(unwrapped->isAsync());
+    MOZ_ASSERT(proto, "We need an explicit prototype to avoid the default"
+                      "%FunctionPrototype% fallback in NewFunctionWithProto().");
 
     // Create a new function with AsyncFunctionPrototype, reusing the name and
     // the length of `unwrapped`.
 
-    // Step 1.
-    RootedObject proto(cx, GlobalObject::getOrCreateAsyncFunctionPrototype(cx, cx->global()));
-    if (!proto)
-        return nullptr;
-
-    RootedAtom funName(cx, unwrapped->name());
+    RootedAtom funName(cx, unwrapped->explicitName());
     uint16_t length;
-    if (!unwrapped->getLength(cx, &length))
+    if (!JSFunction::getLength(cx, unwrapped, &length))
         return nullptr;
 
     // Steps 3 (partially).
@@ -133,12 +133,25 @@ js::WrapAsyncFunction(JSContext* cx, HandleFunction unwrapped)
     if (!wrapped)
         return nullptr;
 
+    if (unwrapped->hasCompileTimeName())
+        wrapped->setCompileTimeName(unwrapped->compileTimeName());
+
     // Link them to each other to make GetWrappedAsyncFunction and
     // GetUnwrappedAsyncFunction work.
     unwrapped->setExtendedSlot(UNWRAPPED_ASYNC_WRAPPED_SLOT, ObjectValue(*wrapped));
     wrapped->setExtendedSlot(WRAPPED_ASYNC_UNWRAPPED_SLOT, ObjectValue(*unwrapped));
 
     return wrapped;
+}
+
+JSObject*
+js::WrapAsyncFunction(JSContext* cx, HandleFunction unwrapped)
+{
+    RootedObject proto(cx, GlobalObject::getOrCreateAsyncFunctionPrototype(cx, cx->global()));
+    if (!proto)
+        return nullptr;
+
+    return WrapAsyncFunctionWithProto(cx, unwrapped, proto);
 }
 
 enum class ResumeKind {
@@ -161,22 +174,14 @@ AsyncFunctionResume(JSContext* cx, Handle<PromiseObject*> resultPromise, HandleV
                                  : cx->names().StarGeneratorThrow;
     FixedInvokeArgs<1> args(cx);
     args[0].set(valueOrReason);
-    RootedValue result(cx);
-    if (!CallSelfHostedFunction(cx, funName, generatorVal, args, &result))
+    RootedValue value(cx);
+    if (!CallSelfHostedFunction(cx, funName, generatorVal, args, &value))
         return AsyncFunctionThrown(cx, resultPromise);
 
-    RootedObject resultObj(cx, &result.toObject());
-    RootedValue doneVal(cx);
-    RootedValue value(cx);
-    if (!GetProperty(cx, resultObj, resultObj, cx->names().done, &doneVal))
-        return false;
-    if (!GetProperty(cx, resultObj, resultObj, cx->names().value, &value))
-        return false;
+    if (generatorVal.toObject().as<GeneratorObject>().isAfterAwait())
+        return AsyncFunctionAwait(cx, resultPromise, value);
 
-    if (doneVal.toBoolean())
-        return AsyncFunctionReturned(cx, resultPromise, value);
-
-    return AsyncFunctionAwait(cx, resultPromise, value);
+    return AsyncFunctionReturned(cx, resultPromise, value);
 }
 
 // Async Functions proposal 2.2 steps 3-8.
@@ -231,10 +236,4 @@ bool
 js::IsWrappedAsyncFunction(JSFunction* fun)
 {
     return fun->maybeNative() == WrappedAsyncFunction;
-}
-
-MOZ_MUST_USE bool
-js::CheckAsyncResumptionValue(JSContext* cx, HandleValue v)
-{
-    return CheckStarGeneratorResumptionValue(cx, v);
 }

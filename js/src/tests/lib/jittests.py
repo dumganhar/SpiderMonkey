@@ -116,12 +116,14 @@ class JitTest:
                                        # enabled.
         self.test_also_wasm_baseline = False # True means run with and and without
                                        # wasm baseline compiler enabled.
+        self.other_includes = [] # Additional files to include, in addition to prologue.js
         self.test_also = [] # List of other configurations to test with.
         self.test_join = [] # List of other configurations to test with all existing variants.
         self.expect_error = '' # Errors to expect and consider passing
         self.expect_status = 0 # Exit status to expect from shell
         self.expect_crash = False # Exit status or error output.
         self.is_module = False
+        self.need_for_each = False # Enable for-each syntax
         self.test_reflect_stringify = None  # Reflect.stringify implementation to test
 
         # Expected by the test runner. Always true for jit-tests.
@@ -137,7 +139,8 @@ class JitTest:
         t.valgrind = self.valgrind
         t.tz_pacific = self.tz_pacific
         t.test_also_noasmjs = self.test_also_noasmjs
-        t.test_also_wasm_baseline = self.test_also_noasmjs
+        t.test_also_wasm_baseline = self.test_also_wasm_baseline
+        t.other_includes = self.other_includes[:]
         t.test_also = self.test_also
         t.test_join = self.test_join
         t.expect_error = self.expect_error
@@ -146,6 +149,7 @@ class JitTest:
         t.test_reflect_stringify = self.test_reflect_stringify
         t.enable = True
         t.is_module = self.is_module
+        t.need_for_each = self.need_for_each
         return t
 
     def copy_and_extend_jitflags(self, variant):
@@ -226,6 +230,8 @@ class JitTest:
                         except ValueError:
                             print("warning: couldn't parse thread-count"
                                   " {}".format(value))
+                    elif name == 'include':
+                        test.other_includes.append(value)
                     else:
                         print('{}: warning: unrecognized |jit-test| attribute'
                               ' {}'.format(path, part))
@@ -262,6 +268,8 @@ class JitTest:
                     elif name.startswith('--'):
                         # // |jit-test| --ion-gvn=off; --no-sse4
                         test.jitflags.append(name)
+                    elif name == 'need-for-each':
+                        test.need_for_each = True
                     else:
                         print('{}: warning: unrecognized |jit-test| attribute'
                               ' {}'.format(path, part))
@@ -297,10 +305,15 @@ class JitTest:
             js_quote(quotechar, libdir),
             js_quote(quotechar, scriptdir_var))
 
+        if self.need_for_each:
+            expr += "; enableForEach()"
+
         # We may have specified '-a' or '-d' twice: once via --jitflags, once
         # via the "|jit-test|" line.  Remove dups because they are toggles.
         cmd = prefix + ['--js-cache', JitTest.CacheDir]
         cmd += list(set(self.jitflags)) + ['-e', expr]
+        for inc in self.other_includes:
+            cmd += ['-f', libdir + inc]
         if self.is_module:
             cmd += ['--module-load-path', moduledir]
             cmd += ['--module', path]
@@ -308,6 +321,7 @@ class JitTest:
             cmd += ['-f', path]
         else:
             cmd += ['--', self.test_reflect_stringify, "--check", path]
+
         if self.valgrind:
             cmd = self.VALGRIND_CMD + cmd
         return cmd

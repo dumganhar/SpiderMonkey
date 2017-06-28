@@ -29,6 +29,7 @@
 
 #include "js/StructuredClone.h"
 
+#include "mozilla/CheckedInt.h"
 #include "mozilla/EndianUtils.h"
 #include "mozilla/FloatingPoint.h"
 
@@ -39,6 +40,7 @@
 #include "jsdate.h"
 #include "jswrapper.h"
 
+#include "builtin/DataViewObject.h"
 #include "builtin/MapObject.h"
 #include "js/Date.h"
 #include "js/GCHashTable.h"
@@ -227,6 +229,69 @@ struct BufferIterator {
     typename BufferList::IterImpl mIter;
 };
 
+SharedArrayRawBufferRefs&
+SharedArrayRawBufferRefs::operator=(SharedArrayRawBufferRefs&& other)
+{
+    takeOwnership(Move(other));
+    return *this;
+}
+
+SharedArrayRawBufferRefs::~SharedArrayRawBufferRefs()
+{
+    releaseAll();
+}
+
+bool
+SharedArrayRawBufferRefs::acquire(JSContext* cx, SharedArrayRawBuffer* rawbuf)
+{
+    if (!refs_.append(rawbuf)) {
+        ReportOutOfMemory(cx);
+        return false;
+    }
+
+    if (!rawbuf->addReference()) {
+        refs_.popBack();
+        JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_SC_SAB_REFCNT_OFLO);
+        return false;
+    }
+
+    return true;
+}
+
+bool
+SharedArrayRawBufferRefs::acquireAll(JSContext* cx, const SharedArrayRawBufferRefs& that)
+{
+    if (!refs_.reserve(refs_.length() + that.refs_.length())) {
+        ReportOutOfMemory(cx);
+        return false;
+    }
+
+    for (auto ref : that.refs_) {
+        if (!ref->addReference()) {
+            JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_SC_SAB_REFCNT_OFLO);
+            return false;
+        }
+        MOZ_ALWAYS_TRUE(refs_.append(ref));
+    }
+
+    return true;
+}
+
+void
+SharedArrayRawBufferRefs::takeOwnership(SharedArrayRawBufferRefs&& other)
+{
+    MOZ_ASSERT(refs_.empty());
+    refs_ = Move(other.refs_);
+}
+
+void
+SharedArrayRawBufferRefs::releaseAll()
+{
+    for (auto ref : refs_)
+        ref->dropReference();
+    refs_.clear();
+}
+
 struct SCOutput {
   public:
     using Iter = BufferIterator<uint64_t, TempAllocPolicy>;
@@ -406,6 +471,9 @@ struct JSStructuredCloneWriter {
     bool extractBuffer(JSStructuredCloneData* data) {
         bool success = out.extractBuffer(data);
         if (success) {
+            // Move the SharedArrayRawBuf references here, SCOutput::extractBuffer
+            // moves the serialized data.
+            data->refsHeld_.takeOwnership(Move(refsHeld));
             data->setOptionalCallbacks(callbacks, closure,
                                        OwnTransferablePolicy::OwnsTransferablesIfAny);
         }
@@ -484,6 +552,9 @@ struct JSStructuredCloneWriter {
 
     const JS::CloneDataPolicy cloneDataPolicy;
 
+    // SharedArrayRawBuffers whose reference counts we have incremented.
+    SharedArrayRawBufferRefs refsHeld;
+
     friend bool JS_WriteString(JSStructuredCloneWriter* w, HandleString str);
     friend bool JS_WriteTypedArray(JSStructuredCloneWriter* w, HandleValue v);
     friend bool JS_ObjectNotWritten(JSStructuredCloneWriter* w, HandleObject obj);
@@ -521,6 +592,10 @@ ReportDataCloneError(JSContext* cx,
 
       case JS_SCERR_UNSUPPORTED_TYPE:
         JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_SC_UNSUPPORTED_TYPE);
+        break;
+
+      case JS_SCERR_SAB_TRANSFERABLE:
+        JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_SC_SAB_TRANSFERABLE);
         break;
 
       default:
@@ -739,6 +814,18 @@ void
 swapFromLittleEndianInPlace(uint8_t* ptr, size_t nelems)
 {}
 
+// Data is packed into an integral number of uint64_t words. Compute the
+// padding required to finish off the final word.
+static size_t
+ComputePadding(size_t nelems, size_t elemSize)
+{
+    // We want total length mod 8, where total length is nelems * sizeof(T),
+    // but that might overflow. So reduce nelems to nelems mod 8, since we are
+    // going to be doing a mod 8 later anyway.
+    size_t leftoverLength = (nelems % sizeof(uint64_t)) * elemSize;
+    return (-leftoverLength) & (sizeof(uint64_t) - 1);
+}
+
 template <class T>
 bool
 SCInput::readArray(T* p, size_t nelems)
@@ -749,20 +836,18 @@ SCInput::readArray(T* p, size_t nelems)
     JS_STATIC_ASSERT(sizeof(uint64_t) % sizeof(T) == 0);
 
     /*
-     * Fail if nelems is so huge as to make JS_HOWMANY overflow or if nwords is
-     * larger than the remaining data.
+     * Fail if nelems is so huge that computing the full size will overflow.
      */
-    size_t nwords = JS_HOWMANY(nelems, sizeof(uint64_t) / sizeof(T));
-    if (nelems + sizeof(uint64_t) / sizeof(T) - 1 < nelems)
+    mozilla::CheckedInt<size_t> size = mozilla::CheckedInt<size_t>(nelems) * sizeof(T);
+    if (!size.isValid())
         return reportTruncated();
 
-    size_t size = sizeof(T) * nelems;
-    if (!point.readBytes(reinterpret_cast<char*>(p), size))
+    if (!point.readBytes(reinterpret_cast<char*>(p), size.value()))
         return false;
 
     swapFromLittleEndianInPlace(p, nelems);
 
-    point += sizeof(uint64_t) * nwords - size;
+    point += ComputePadding(nelems, sizeof(T));
 
     return true;
 }
@@ -845,20 +930,6 @@ SCOutput::writeDouble(double d)
     return write(BitwiseCast<uint64_t>(CanonicalizeNaN(d)));
 }
 
-template <typename T>
-static T
-swapToLittleEndian(T value)
-{
-    return NativeEndian::swapToLittleEndian(value);
-}
-
-template <>
-uint8_t
-swapToLittleEndian(uint8_t value)
-{
-    return value;
-}
-
 template <class T>
 bool
 SCOutput::writeArray(const T* p, size_t nelems)
@@ -869,25 +940,36 @@ SCOutput::writeArray(const T* p, size_t nelems)
     if (nelems == 0)
         return true;
 
-    if (nelems + sizeof(uint64_t) / sizeof(T) - 1 < nelems) {
-        ReportAllocationOverflow(context());
-        return false;
-    }
-
     for (size_t i = 0; i < nelems; i++) {
-        T value = swapToLittleEndian(p[i]);
+        T value = NativeEndian::swapToLittleEndian(p[i]);
         if (!buf.WriteBytes(reinterpret_cast<char*>(&value), sizeof(value)))
             return false;
     }
 
+    // Zero-pad to 8 bytes boundary.
+    size_t padbytes = ComputePadding(nelems, sizeof(T));
+    char zeroes[sizeof(uint64_t)] = { 0 };
+    if (!buf.WriteBytes(zeroes, padbytes))
+        return false;
+
+    return true;
+}
+
+template <>
+bool
+SCOutput::writeArray<uint8_t>(const uint8_t* p, size_t nelems)
+{
+    if (nelems == 0)
+        return true;
+
+    if (!buf.WriteBytes(reinterpret_cast<const char*>(p), nelems))
+        return false;
+
     // zero-pad to 8 bytes boundary
-    size_t nwords = JS_HOWMANY(nelems, sizeof(uint64_t) / sizeof(T));
-    size_t padbytes = sizeof(uint64_t) * nwords - sizeof(T) * nelems;
-    char zero = 0;
-    for (size_t i = 0; i < padbytes; i++) {
-        if (!buf.WriteBytes(&zero, sizeof(zero)))
-            return false;
-    }
+    size_t padbytes = ComputePadding(nelems, 1);
+    char zeroes[sizeof(uint64_t)] = { 0 };
+    if (!buf.WriteBytes(zeroes, padbytes))
+        return false;
 
     return true;
 }
@@ -1008,13 +1090,8 @@ JSStructuredCloneWriter::parseTransferable()
             return reportDataCloneError(JS_SCERR_TRANSFERABLE);
         tObj = &v.toObject();
 
-        // Backward compatibility, see bug 1302036 and bug 1302037.
-        if (tObj->is<SharedArrayBufferObject>()) {
-            if (!JS_ReportErrorFlagsAndNumberASCII(cx, JSREPORT_WARNING, GetErrorMessage,
-                                                   nullptr, JSMSG_SC_SAB_TRANSFER))
-                return false;
-            continue;
-        }
+        if (tObj->is<SharedArrayBufferObject>())
+            return reportDataCloneError(JS_SCERR_SAB_TRANSFERABLE);
 
         // No duplicates allowed
         auto p = transferableObjects.lookupForAdd(tObj);
@@ -1153,9 +1230,8 @@ JSStructuredCloneWriter::writeSharedArrayBuffer(HandleObject obj)
     Rooted<SharedArrayBufferObject*> sharedArrayBuffer(context(), &CheckedUnwrap(obj)->as<SharedArrayBufferObject>());
     SharedArrayRawBuffer* rawbuf = sharedArrayBuffer->rawBufferObject();
 
-    // Avoids a race condition where the parent thread frees the buffer
-    // before the child has accepted the transferable.
-    rawbuf->addReference();
+    if (!refsHeld.acquire(context(), rawbuf))
+        return false;
 
     intptr_t p = reinterpret_cast<intptr_t>(rawbuf);
     return out.writePair(SCTAG_SHARED_ARRAY_BUFFER_OBJECT, static_cast<uint32_t>(sizeof(p))) &&
@@ -1346,6 +1422,7 @@ JSStructuredCloneWriter::traverseSavedFrame(HandleObject obj)
 
     RootedValue val(context());
 
+    context()->markAtom(savedFrame->getSource());
     val = StringValue(savedFrame->getSource());
     if (!startWrite(val))
         return false;
@@ -1359,11 +1436,13 @@ JSStructuredCloneWriter::traverseSavedFrame(HandleObject obj)
         return false;
 
     auto name = savedFrame->getFunctionDisplayName();
+    context()->markAtom(name);
     val = name ? StringValue(name) : NullValue();
     if (!startWrite(val))
         return false;
 
     auto cause = savedFrame->getAsyncCause();
+    context()->markAtom(cause);
     val = cause ? StringValue(cause) : NullValue();
     if (!startWrite(val))
         return false;
@@ -1878,17 +1957,23 @@ JSStructuredCloneReader::readSharedArrayBuffer(uint32_t nbytes, MutableHandleVal
     // in any case.  Just fail at the receiving end if we can't handle it.
 
     if (!context()->compartment()->creationOptions().getSharedMemoryAndAtomicsEnabled()) {
-        // The sending side performed a reference increment before sending.
-        // Account for that here before leaving.
-        if (rawbuf)
-            rawbuf->dropReference();
-
         JS_ReportErrorNumberASCII(context(), GetErrorMessage, nullptr, JSMSG_SC_SAB_DISABLED);
         return false;
     }
 
-    // The constructor absorbs the reference count increment performed by the sender.
+    // The new object will have a new reference to the rawbuf.
+
+    if (!rawbuf->addReference()) {
+        JS_ReportErrorNumberASCII(context(), GetErrorMessage, nullptr, JSMSG_SC_SAB_REFCNT_OFLO);
+        return false;
+    }
+
     JSObject* obj = SharedArrayBufferObject::New(context(), rawbuf);
+
+    if (!obj) {
+        rawbuf->dropReference();
+        return false;
+    }
 
     vp.setObject(*obj);
     return true;
@@ -2333,6 +2418,7 @@ JSStructuredCloneReader::readSavedFrame(uint32_t principalsTag)
         if (!atomName)
             return nullptr;
     }
+
     savedFrame->initFunctionDisplayName(atomName);
 
     RootedValue cause(context());
@@ -2468,7 +2554,7 @@ JS_ReadStructuredClone(JSContext* cx, JSStructuredCloneData& buf,
                        const JSStructuredCloneCallbacks* optionalCallbacks,
                        void* closure)
 {
-    AssertHeapIsIdle(cx);
+    AssertHeapIsIdle();
     CHECK_REQUEST(cx);
 
     if (version > JS_STRUCTURED_CLONE_VERSION) {
@@ -2486,7 +2572,7 @@ JS_WriteStructuredClone(JSContext* cx, HandleValue value, JSStructuredCloneData*
                         const JSStructuredCloneCallbacks* optionalCallbacks,
                         void* closure, HandleValue transferable)
 {
-    AssertHeapIsIdle(cx);
+    AssertHeapIsIdle();
     CHECK_REQUEST(cx);
     assertSameCompartment(cx, value);
 
@@ -2508,7 +2594,7 @@ JS_StructuredClone(JSContext* cx, HandleValue value, MutableHandleValue vp,
                    const JSStructuredCloneCallbacks* optionalCallbacks,
                    void* closure)
 {
-    AssertHeapIsIdle(cx);
+    AssertHeapIsIdle();
     CHECK_REQUEST(cx);
 
     // Strings are associated with zones, not compartments,
@@ -2574,13 +2660,14 @@ JSAutoStructuredCloneBuffer::clear(const JSStructuredCloneCallbacks* optionalCal
     if (data_.ownTransferables_ == OwnTransferablePolicy::OwnsTransferablesIfAny)
         DiscardTransferables(data_, callbacks, closure);
     data_.ownTransferables_ = OwnTransferablePolicy::NoTransferables;
+    data_.refsHeld_.releaseAll();
     data_.Clear();
     version_ = 0;
 }
 
 bool
-JSAutoStructuredCloneBuffer::copy(const JSStructuredCloneData& srcData, uint32_t version,
-                                  const JSStructuredCloneCallbacks* callbacks,
+JSAutoStructuredCloneBuffer::copy(JSContext* cx, const JSStructuredCloneData& srcData,
+                                  uint32_t version, const JSStructuredCloneCallbacks* callbacks,
                                   void* closure)
 {
     // transferable objects cannot be copied
@@ -2591,11 +2678,16 @@ JSAutoStructuredCloneBuffer::copy(const JSStructuredCloneData& srcData, uint32_t
 
     auto iter = srcData.Iter();
     while (!iter.Done()) {
-            data_.WriteBytes(iter.Data(), iter.RemainingInSegment());
-            iter.Advance(srcData, iter.RemainingInSegment());
+        if (!data_.WriteBytes(iter.Data(), iter.RemainingInSegment()))
+            return false;
+        iter.Advance(srcData, iter.RemainingInSegment());
     }
 
     version_ = version;
+
+    if (!data_.refsHeld_.acquireAll(cx, srcData.refsHeld_))
+        return false;
+
     data_.setOptionalCallbacks(callbacks, closure, OwnTransferablePolicy::NoTransferables);
     return true;
 }

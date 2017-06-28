@@ -28,6 +28,11 @@
     _(AtomicsXor)                   \
     _(AtomicsIsLockFree)            \
                                     \
+    _(IntlIsCollator)               \
+    _(IntlIsDateTimeFormat)         \
+    _(IntlIsNumberFormat)           \
+    _(IntlIsPluralRules)            \
+                                    \
     _(MathAbs)                      \
     _(MathFloor)                    \
     _(MathCeil)                     \
@@ -114,14 +119,12 @@
     _(IntrinsicToString)            \
     _(IntrinsicIsConstructing)      \
     _(IntrinsicSubstringKernel)     \
-    _(IntrinsicDefineDataProperty)  \
     _(IntrinsicObjectHasPrototype)  \
                                     \
     _(IntrinsicIsArrayIterator)     \
     _(IntrinsicIsMapIterator)       \
     _(IntrinsicIsSetIterator)       \
     _(IntrinsicIsStringIterator)    \
-    _(IntrinsicIsListIterator)      \
                                     \
     _(IntrinsicGetNextMapEntryForIterator) \
                                     \

@@ -40,6 +40,9 @@
 #include "jit/arm/Architecture-arm.h"
 #endif
 #include "jit/arm/Simulator-arm.h"
+#if defined(JS_CODEGEN_ARM64)
+#include "jit/arm64/vixl/Cpu-vixl.h"
+#endif
 #include "jit/mips32/Simulator-mips32.h"
 #include "jit/mips64/Simulator-mips64.h"
 #include "jit/ProcessExecutableMemory.h"
@@ -47,7 +50,7 @@
 #include "js/HashTable.h"
 #include "js/Vector.h"
 
-#ifdef JS_CPU_SPARC
+#if defined(__sparc__)
 #ifdef __linux__  // bugzilla 502369
 static void sync_instruction_memory(caddr_t v, u_int len)
 {
@@ -174,7 +177,7 @@ class ExecutableAllocator
     // alloc() returns a pointer to some memory, and also (by reference) a
     // pointer to reference-counted pool. The caller owns a reference to the
     // pool; i.e. alloc() increments the count before returning the object.
-    void* alloc(size_t n, ExecutablePool** poolp, CodeKind type);
+    void* alloc(JSContext* cx, size_t n, ExecutablePool** poolp, CodeKind type);
 
     void releasePoolPages(ExecutablePool* pool);
 
@@ -223,7 +226,7 @@ class ExecutableAllocator
 #elif defined(JS_SIMULATOR_ARM) || defined(JS_SIMULATOR_MIPS32) || defined(JS_SIMULATOR_MIPS64)
     static void cacheFlush(void* code, size_t size)
     {
-        js::jit::Simulator::FlushICache(code, size);
+        js::jit::SimulatorProcess::FlushICache(code, size);
     }
 #elif defined(JS_CODEGEN_MIPS32) || defined(JS_CODEGEN_MIPS64)
     static void cacheFlush(void* code, size_t size)
@@ -256,7 +259,7 @@ class ExecutableAllocator
     {
         __clear_cache(code, reinterpret_cast<char*>(code) + size);
     }
-#elif defined(JS_CODEGEN_ARM) && defined(XP_IOS)
+#elif (defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_ARM64)) && defined(XP_IOS)
     static void cacheFlush(void* code, size_t size)
     {
         sys_icache_invalidate(code, size);
@@ -277,6 +280,7 @@ class ExecutableAllocator
             :
             : "r" (code), "r" (end)
             : "r0", "r1", "r2");
+
         if (ForceDoubleCacheFlush()) {
             void* start = (void*)((uintptr_t)code + 1);
             asm volatile (
@@ -293,12 +297,12 @@ class ExecutableAllocator
                 : "r0", "r1", "r2");
         }
     }
-#elif defined(JS_CODEGEN_ARM64) && (defined(__linux__) || defined(ANDROID)) && defined(__GNUC__)
+#elif defined(JS_CODEGEN_ARM64)
     static void cacheFlush(void* code, size_t size)
     {
-	__clear_cache(code, (void *)((size_t)code + size));
+        vixl::CPU::EnsureIAndDCacheCoherency(code, size);
     }
-#elif JS_CPU_SPARC
+#elif defined(__sparc__)
     static void cacheFlush(void* code, size_t size)
     {
         sync_instruction_memory((caddr_t)code, size);

@@ -6,13 +6,10 @@
 
 # Build mozglue as a shared lib on Windows, OSX and Android.
 # If this is ever changed, update MOZ_SHARED_MOZGLUE in browser/installer/Makefile.in
-# If JS_STANDALONE, always build as static.
-if CONFIG['OS_TARGET'] in ('WINNT', 'Darwin', 'Android') and not CONFIG['JS_STANDALONE']:
+if CONFIG['OS_TARGET'] in ('WINNT', 'Darwin', 'Android'):
     SharedLibrary('mozglue')
 else:
     Library('mozglue')
-
-SDK_LIBRARY = True
 
 if CONFIG['OS_TARGET'] == 'Android':
     SOURCES += [

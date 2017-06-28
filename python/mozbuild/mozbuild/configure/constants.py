@@ -39,9 +39,8 @@ Kernel = EnumString.subclass(
 )
 
 CPU_bitness = {
-    'arm64': 64,
     'aarch64': 64,
-    'Alpha': 32,
+    'Alpha': 64,
     'arm': 32,
     'hppa': 32,
     'ia64': 64,
@@ -51,6 +50,7 @@ CPU_bitness = {
     'ppc64': 64,
     's390': 32,
     's390x': 64,
+    'sh4': 32,
     'sparc': 32,
     'sparc64': 64,
     'x86': 32,
@@ -74,7 +74,6 @@ CPU_preprocessor_checks = OrderedDict((
     ('x86', '__i386__ || _M_IX86'),
     ('x86_64', '__x86_64__ || _M_X64'),
     ('arm', '__arm__ || _M_ARM'),
-    ('arm64', '__aarch64__'),
     ('aarch64', '__aarch64__'),
     ('ia64', '__ia64__'),
     ('s390x', '__s390x__'),
@@ -87,6 +86,7 @@ CPU_preprocessor_checks = OrderedDict((
     ('sparc', '__sparc__'),
     ('mips64', '__mips64'),
     ('mips32', '__mips__'),
+    ('sh4', '__sh__'),
 ))
 
 assert sorted(CPU_preprocessor_checks.keys()) == sorted(CPU.POSSIBLE_VALUES)

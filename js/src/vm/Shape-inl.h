@@ -15,7 +15,7 @@
 
 #include "gc/Allocator.h"
 #include "vm/Interpreter.h"
-#include "vm/TypedArrayCommon.h"
+#include "vm/TypedArrayObject.h"
 
 #include "jsatominlines.h"
 #include "jscntxtinlines.h"
@@ -23,7 +23,7 @@
 namespace js {
 
 inline
-AutoKeepShapeTables::AutoKeepShapeTables(ExclusiveContext* cx)
+AutoKeepShapeTables::AutoKeepShapeTables(JSContext* cx)
   : cx_(cx),
     prev_(cx->zone()->keepShapeTables())
 {
@@ -37,19 +37,19 @@ AutoKeepShapeTables::~AutoKeepShapeTables()
 }
 
 inline
-StackBaseShape::StackBaseShape(ExclusiveContext* cx, const Class* clasp, uint32_t objectFlags)
+StackBaseShape::StackBaseShape(JSContext* cx, const Class* clasp, uint32_t objectFlags)
   : flags(objectFlags),
     clasp(clasp)
 {}
 
 inline Shape*
-Shape::search(ExclusiveContext* cx, jsid id)
+Shape::search(JSContext* cx, jsid id)
 {
     return search(cx, this, id);
 }
 
 MOZ_ALWAYS_INLINE bool
-Shape::maybeCreateTableForLookup(ExclusiveContext* cx)
+Shape::maybeCreateTableForLookup(JSContext* cx)
 {
     if (hasTable())
         return true;
@@ -67,7 +67,7 @@ Shape::maybeCreateTableForLookup(ExclusiveContext* cx)
 
 template<MaybeAdding Adding>
 /* static */ inline bool
-Shape::search(ExclusiveContext* cx, Shape* start, jsid id, const AutoKeepShapeTables& keep,
+Shape::search(JSContext* cx, Shape* start, jsid id, const AutoKeepShapeTables& keep,
               Shape** pshape, ShapeTable::Entry** pentry)
 {
     if (start->inDictionary()) {
@@ -86,7 +86,7 @@ Shape::search(ExclusiveContext* cx, Shape* start, jsid id, const AutoKeepShapeTa
 
 template<MaybeAdding Adding>
 /* static */ inline Shape*
-Shape::search(ExclusiveContext* cx, Shape* start, jsid id)
+Shape::search(JSContext* cx, Shape* start, jsid id)
 {
     if (start->maybeCreateTableForLookup(cx)) {
         JS::AutoCheckCannotGC nogc;
@@ -103,7 +103,7 @@ Shape::search(ExclusiveContext* cx, Shape* start, jsid id)
 }
 
 inline Shape*
-Shape::new_(ExclusiveContext* cx, Handle<StackShape> other, uint32_t nfixed)
+Shape::new_(JSContext* cx, Handle<StackShape> other, uint32_t nfixed)
 {
     Shape* shape = other.isAccessorShape()
                    ? js::Allocate<AccessorShape>(cx)
@@ -124,14 +124,14 @@ Shape::new_(ExclusiveContext* cx, Handle<StackShape> other, uint32_t nfixed)
 inline void
 Shape::updateBaseShapeAfterMovingGC()
 {
-    BaseShape* base = base_.unbarrieredGet();
+    BaseShape* base = base_;
     if (IsForwarded(base))
         base_.unsafeSet(Forwarded(base));
 }
 
 template<class ObjectSubclass>
 /* static */ inline bool
-EmptyShape::ensureInitialCustomShape(ExclusiveContext* cx, Handle<ObjectSubclass*> obj)
+EmptyShape::ensureInitialCustomShape(JSContext* cx, Handle<ObjectSubclass*> obj)
 {
     static_assert(mozilla::IsBaseOf<JSObject, ObjectSubclass>::value,
                   "ObjectSubclass must be a subclass of JSObject");
@@ -163,14 +163,14 @@ EmptyShape::ensureInitialCustomShape(ExclusiveContext* cx, Handle<ObjectSubclass
 }
 
 inline
-AutoRooterGetterSetter::Inner::Inner(ExclusiveContext* cx, uint8_t attrs,
+AutoRooterGetterSetter::Inner::Inner(JSContext* cx, uint8_t attrs,
                                      GetterOp* pgetter_, SetterOp* psetter_)
   : CustomAutoRooter(cx), attrs(attrs),
     pgetter(pgetter_), psetter(psetter_)
 {}
 
 inline
-AutoRooterGetterSetter::AutoRooterGetterSetter(ExclusiveContext* cx, uint8_t attrs,
+AutoRooterGetterSetter::AutoRooterGetterSetter(JSContext* cx, uint8_t attrs,
                                                GetterOp* pgetter, SetterOp* psetter
                                                MOZ_GUARD_OBJECT_NOTIFIER_PARAM_IN_IMPL)
 {
@@ -180,7 +180,7 @@ AutoRooterGetterSetter::AutoRooterGetterSetter(ExclusiveContext* cx, uint8_t att
 }
 
 inline
-AutoRooterGetterSetter::AutoRooterGetterSetter(ExclusiveContext* cx, uint8_t attrs,
+AutoRooterGetterSetter::AutoRooterGetterSetter(JSContext* cx, uint8_t attrs,
                                                JSNative* pgetter, JSNative* psetter
                                                MOZ_GUARD_OBJECT_NOTIFIER_PARAM_IN_IMPL)
 {
@@ -192,17 +192,17 @@ AutoRooterGetterSetter::AutoRooterGetterSetter(ExclusiveContext* cx, uint8_t att
 }
 
 static inline uint8_t
-GetShapeAttributes(JSObject* obj, Shape* shape)
+GetPropertyAttributes(JSObject* obj, PropertyResult prop)
 {
     MOZ_ASSERT(obj->isNative());
 
-    if (IsImplicitDenseOrTypedArrayElement(shape)) {
+    if (prop.isDenseOrTypedArrayElement()) {
         if (obj->is<TypedArrayObject>())
             return JSPROP_ENUMERATE | JSPROP_PERMANENT;
         return obj->as<NativeObject>().getElementsHeader()->elementAttributes();
     }
 
-    return shape->attributes();
+    return prop.shape()->attributes();
 }
 
 } /* namespace js */

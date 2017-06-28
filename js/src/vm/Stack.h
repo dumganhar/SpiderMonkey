@@ -41,7 +41,7 @@ class CallObject;
 class FrameIter;
 class EnvironmentObject;
 class ScriptFrameIter;
-class SPSProfiler;
+class GeckoProfiler;
 class InterpreterFrame;
 class LexicalEnvironmentObject;
 class EnvironmentIter;
@@ -53,6 +53,7 @@ namespace jit {
 class CommonFrameLayout;
 }
 namespace wasm {
+class DebugFrame;
 class Instance;
 }
 
@@ -126,7 +127,8 @@ class AbstractFramePtr
         Tag_InterpreterFrame = 0x1,
         Tag_BaselineFrame = 0x2,
         Tag_RematerializedFrame = 0x3,
-        TagMask = 0x3
+        Tag_WasmDebugFrame = 0x4,
+        TagMask = 0x7
     };
 
   public:
@@ -150,6 +152,12 @@ class AbstractFramePtr
       : ptr_(fp ? uintptr_t(fp) | Tag_RematerializedFrame : 0)
     {
         MOZ_ASSERT_IF(fp, asRematerializedFrame() == fp);
+    }
+
+    MOZ_IMPLICIT AbstractFramePtr(wasm::DebugFrame* fp)
+      : ptr_(fp ? uintptr_t(fp) | Tag_WasmDebugFrame : 0)
+    {
+        MOZ_ASSERT_IF(fp, asWasmDebugFrame() == fp);
     }
 
     static AbstractFramePtr FromRaw(void* raw) {
@@ -188,6 +196,15 @@ class AbstractFramePtr
         MOZ_ASSERT(res);
         return res;
     }
+    bool isWasmDebugFrame() const {
+        return (ptr_ & TagMask) == Tag_WasmDebugFrame;
+    }
+    wasm::DebugFrame* asWasmDebugFrame() const {
+        MOZ_ASSERT(isWasmDebugFrame());
+        wasm::DebugFrame* res = (wasm::DebugFrame*)(ptr_ & ~TagMask);
+        MOZ_ASSERT(res);
+        return res;
+    }
 
     void* raw() const { return reinterpret_cast<void*>(ptr_); }
 
@@ -215,7 +232,10 @@ class AbstractFramePtr
     inline bool hasCachedSavedFrame() const;
     inline void setHasCachedSavedFrame();
 
+    inline bool hasScript() const;
     inline JSScript* script() const;
+    inline wasm::Instance* wasmInstance() const;
+    inline GlobalObject* global() const;
     inline JSFunction* callee() const;
     inline Value calleev() const;
     inline Value& thisArgument() const;
@@ -259,6 +279,7 @@ class AbstractFramePtr
     friend void GDBTestInitAbstractFramePtr(AbstractFramePtr&, InterpreterFrame*);
     friend void GDBTestInitAbstractFramePtr(AbstractFramePtr&, jit::BaselineFrame*);
     friend void GDBTestInitAbstractFramePtr(AbstractFramePtr&, jit::RematerializedFrame*);
+    friend void GDBTestInitAbstractFramePtr(AbstractFramePtr& frame, wasm::DebugFrame* ptr);
 };
 
 class NullFramePtr : public AbstractFramePtr
@@ -296,8 +317,8 @@ class InterpreterFrame
          */
         DEBUGGEE               =       0x40,  /* Execution is being observed by Debugger */
 
-        /* Used in tracking calls and profiling (see vm/SPSProfiler.cpp) */
-        HAS_PUSHED_SPS_FRAME   =       0x80,  /* SPS was notified of entry */
+        /* Used in tracking calls and profiling (see vm/GeckoProfiler.cpp) */
+        HAS_PUSHED_PROF_FRAME  =       0x80,  /* Gecko Profiler was notified of entry */
 
         /*
          * If set, we entered one of the JITs and ScriptFrameIter should skip
@@ -645,16 +666,16 @@ class InterpreterFrame
 
     /* Profiler flags */
 
-    bool hasPushedSPSFrame() {
-        return !!(flags_ & HAS_PUSHED_SPS_FRAME);
+    bool hasPushedGeckoProfilerFrame() {
+        return !!(flags_ & HAS_PUSHED_PROF_FRAME);
     }
 
-    void setPushedSPSFrame() {
-        flags_ |= HAS_PUSHED_SPS_FRAME;
+    void setPushedGeckoProfilerFrame() {
+        flags_ |= HAS_PUSHED_PROF_FRAME;
     }
 
-    void unsetPushedSPSFrame() {
-        flags_ &= ~HAS_PUSHED_SPS_FRAME;
+    void unsetPushedGeckoProfilerFrame() {
+        flags_ &= ~HAS_PUSHED_PROF_FRAME;
     }
 
     /* Return value */
@@ -684,7 +705,8 @@ class InterpreterFrame
     }
 
     void resumeGeneratorFrame(JSObject* envChain) {
-        MOZ_ASSERT(script()->isGenerator());
+        MOZ_ASSERT(script()->isStarGenerator() || script()->isLegacyGenerator() ||
+                   script()->isAsync());
         MOZ_ASSERT(isFunctionFrame());
         flags_ |= HAS_INITIAL_ENV;
         envChain_ = envChain;
@@ -915,7 +937,24 @@ class InterpreterStack
     }
 };
 
-void MarkInterpreterActivations(JSRuntime* rt, JSTracer* trc);
+// CooperatingContext is a wrapper for a JSContext that is participating in
+// cooperative scheduling and may be different from the current thread. It is
+// in place to make it clearer when we might be operating on another thread,
+// and harder to accidentally pass in another thread's context to an API that
+// expects the current thread's context.
+class CooperatingContext
+{
+    JSContext* cx;
+
+  public:
+    explicit CooperatingContext(JSContext* cx) : cx(cx) {}
+    JSContext* context() const { return cx; }
+
+    // For &cx. The address should not be taken for other CooperatingContexts.
+    friend class ZoneGroup;
+};
+
+void TraceInterpreterActivations(JSContext* cx, const CooperatingContext& target, JSTracer* trc);
 
 /*****************************************************************************/
 
@@ -1388,8 +1427,7 @@ class InterpreterActivation : public Activation
     }
 };
 
-// Iterates over a thread's activation list. If given a runtime, iterate over
-// the runtime's main thread's activation list.
+// Iterates over a thread's activation list.
 class ActivationIterator
 {
     uint8_t* jitTop_;
@@ -1401,7 +1439,12 @@ class ActivationIterator
     void settle();
 
   public:
-    explicit ActivationIterator(JSRuntime* rt);
+    explicit ActivationIterator(JSContext* cx);
+
+    // ActivationIterator can be used to iterate over a different thread's
+    // activations, for use by the GC, invalidation, and other operations that
+    // don't have a user-visible effect on the target thread's JS behavior.
+    ActivationIterator(JSContext* cx, const CooperatingContext& target);
 
     ActivationIterator& operator++();
 
@@ -1539,7 +1582,7 @@ class JitActivation : public Activation
     // Remove a previous rematerialization by fp.
     void removeRematerializedFrame(uint8_t* top);
 
-    void markRematerializedFrames(JSTracer* trc);
+    void traceRematerializedFrames(JSTracer* trc);
 
 
     // Register the results of on Ion frame recovery.
@@ -1552,7 +1595,7 @@ class JitActivation : public Activation
     // from the activation.
     void removeIonFrameRecovery(JitFrameLayout* fp);
 
-    void markIonRecovery(JSTracer* trc);
+    void traceIonRecovery(JSTracer* trc);
 
     // Return the bailout information if it is registered.
     const BailoutFrameInfo* bailoutData() const { return bailoutData_; }
@@ -1593,8 +1636,14 @@ class JitActivationIterator : public ActivationIterator
     }
 
   public:
-    explicit JitActivationIterator(JSRuntime* rt)
-      : ActivationIterator(rt)
+    explicit JitActivationIterator(JSContext* cx)
+      : ActivationIterator(cx)
+    {
+        settle();
+    }
+
+    JitActivationIterator(JSContext* cx, const CooperatingContext& target)
+      : ActivationIterator(cx, target)
     {
         settle();
     }
@@ -1696,9 +1745,12 @@ class WasmActivation : public Activation
     // Read/written from SIGSEGV handler:
     void setResumePC(void* pc) { resumePC_ = pc; }
     void* resumePC() const { return resumePC_; }
+
+    // Used by wasm::FrameIterator during stack unwinding.
+    void unwindFP(uint8_t* fp) { fp_ = fp; }
 };
 
-// A FrameIter walks over the runtime's stack of JS script activations,
+// A FrameIter walks over a context's stack of JS script activations,
 // abstracting over whether the JS scripts were running in the interpreter or
 // different modes of compiled code.
 //
@@ -1788,6 +1840,15 @@ class FrameIter
     bool hasScript() const { return !isWasm(); }
 
     // -----------------------------------------------------------
+    //  The following functions can only be called when isWasm()
+    // -----------------------------------------------------------
+
+    inline bool wasmDebugEnabled() const;
+    inline wasm::Instance* wasmInstance() const;
+    inline unsigned wasmBytecodeOffset() const;
+    void wasmUpdateBytecodeOffset();
+
+    // -----------------------------------------------------------
     // The following functions can only be called when hasScript()
     // -----------------------------------------------------------
 
@@ -1848,7 +1909,7 @@ class FrameIter
 
     // -----------------------------------------------------------
     // The following functions can only be called when isInterp(),
-    // isBaseline(), or isIon(). Further, abstractFramePtr() can
+    // isBaseline(), isWasm() or isIon(). Further, abstractFramePtr() can
     // only be called when hasUsableAbstractFramePtr().
     // -----------------------------------------------------------
 
@@ -2028,6 +2089,30 @@ FrameIter::script() const
     if (data_.jitFrames_.isIonJS())
         return ionInlineFrames_.script();
     return data_.jitFrames_.script();
+}
+
+inline bool
+FrameIter::wasmDebugEnabled() const
+{
+    MOZ_ASSERT(!done());
+    MOZ_ASSERT(data_.state_ == WASM);
+    return data_.wasmFrames_.debugEnabled();
+}
+
+inline wasm::Instance*
+FrameIter::wasmInstance() const
+{
+    MOZ_ASSERT(!done());
+    MOZ_ASSERT(data_.state_ == WASM && wasmDebugEnabled());
+    return data_.wasmFrames_.instance();
+}
+
+inline unsigned
+FrameIter::wasmBytecodeOffset() const
+{
+    MOZ_ASSERT(!done());
+    MOZ_ASSERT(data_.state_ == WASM);
+    return data_.wasmFrames_.lineOrBytecode();
 }
 
 inline bool

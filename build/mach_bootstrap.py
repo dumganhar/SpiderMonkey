@@ -42,6 +42,7 @@ SEARCH_PATHS = [
     'python/blessings',
     'python/compare-locales',
     'python/configobj',
+    'python/dlmanager',
     'python/futures',
     'python/jsmin',
     'python/psutil',
@@ -53,6 +54,7 @@ SEARCH_PATHS = [
     'python/slugid',
     'python/py',
     'python/pytest',
+    'python/pytoml',
     'python/redo',
     'python/voluptuous',
     'build',
@@ -93,6 +95,7 @@ SEARCH_PATHS = [
     'testing/web-platform',
     'testing/web-platform/harness',
     'testing/web-platform/tests/tools/wptserve',
+    'testing/web-platform/tests/tools/six',
     'testing/xpcshell',
     'xpcom/idl-parser',
 ]
@@ -116,6 +119,7 @@ MACH_MODULES = [
     'python/mozbuild/mozbuild/frontend/mach_commands.py',
     'services/common/tests/mach_commands.py',
     'taskcluster/mach_commands.py',
+    'testing/awsy/mach_commands.py',
     'testing/firefox-ui/mach_commands.py',
     'testing/mach_commands.py',
     'testing/marionette/mach_commands.py',
@@ -203,6 +207,9 @@ def bootstrap(topsrcdir, mozilla_dir=None):
     sys.path[0:0] = [os.path.join(mozilla_dir, path) for path in SEARCH_PATHS]
     import mach.main
     from mozboot.util import get_state_dir
+
+    from mozbuild.util import patch_main
+    patch_main()
 
     def telemetry_handler(context, data):
         # We have not opted-in to telemetry
@@ -402,7 +409,8 @@ class ImportHook(object):
         # python modules under our source directory (either because it
         # doesn't happen or because it doesn't matter).
         if not os.path.exists(module.__file__[:-1]):
-            os.remove(module.__file__)
+            if os.path.exists(module.__file__):
+                os.remove(module.__file__)
             del sys.modules[module.__name__]
             module = self(name, globals, locals, fromlist, level)
 

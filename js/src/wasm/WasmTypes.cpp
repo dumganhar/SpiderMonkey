@@ -32,6 +32,7 @@
 #include "wasm/WasmSerialize.h"
 #include "wasm/WasmSignalHandlers.h"
 
+#include "vm/Debugger-inl.h"
 #include "vm/Stack-inl.h"
 
 using namespace js;
@@ -80,13 +81,13 @@ __aeabi_uidivmod(int, int);
 static void
 WasmReportOverRecursed()
 {
-    ReportOverRecursed(JSRuntime::innermostWasmActivation()->cx());
+    ReportOverRecursed(JSContext::innermostWasmActivation()->cx());
 }
 
 static bool
 WasmHandleExecutionInterrupt()
 {
-    WasmActivation* activation = JSRuntime::innermostWasmActivation();
+    WasmActivation* activation = JSContext::innermostWasmActivation();
     bool success = CheckForInterrupt(activation->cx());
 
     // Preserve the invariant that having a non-null resumePC means that we are
@@ -98,10 +99,111 @@ WasmHandleExecutionInterrupt()
     return success;
 }
 
+static bool
+WasmHandleDebugTrap()
+{
+    WasmActivation* activation = JSContext::innermostWasmActivation();
+    MOZ_ASSERT(activation);
+    JSContext* cx = activation->cx();
+
+    FrameIterator iter(activation);
+    MOZ_ASSERT(iter.debugEnabled());
+    const CallSite* site = iter.debugTrapCallsite();
+    MOZ_ASSERT(site);
+    if (site->kind() == CallSite::EnterFrame) {
+        if (!iter.instance()->enterFrameTrapsEnabled())
+            return true;
+        DebugFrame* frame = iter.debugFrame();
+        frame->setIsDebuggee();
+        frame->observeFrame(cx);
+        // TODO call onEnterFrame
+        JSTrapStatus status = Debugger::onEnterFrame(cx, frame);
+        if (status == JSTRAP_RETURN) {
+            // Ignoring forced return (JSTRAP_RETURN) -- changing code execution
+            // order is not yet implemented in the wasm baseline.
+            // TODO properly handle JSTRAP_RETURN and resume wasm execution.
+            JS_ReportErrorASCII(cx, "Unexpected resumption value from onEnterFrame");
+            return false;
+        }
+        return status == JSTRAP_CONTINUE;
+    }
+    if (site->kind() == CallSite::LeaveFrame) {
+        DebugFrame* frame = iter.debugFrame();
+        frame->updateReturnJSValue();
+        bool ok = Debugger::onLeaveFrame(cx, frame, nullptr, true);
+        frame->leaveFrame(cx);
+        return ok;
+    }
+
+    DebugFrame* frame = iter.debugFrame();
+    Code& code = iter.instance()->code();
+    MOZ_ASSERT(code.hasBreakpointTrapAtOffset(site->lineOrBytecode()));
+    if (code.stepModeEnabled(frame->funcIndex())) {
+        RootedValue result(cx, UndefinedValue());
+        JSTrapStatus status = Debugger::onSingleStep(cx, &result);
+        if (status == JSTRAP_RETURN) {
+            // TODO properly handle JSTRAP_RETURN.
+            JS_ReportErrorASCII(cx, "Unexpected resumption value from onSingleStep");
+            return false;
+        }
+        if (status != JSTRAP_CONTINUE)
+            return false;
+    }
+    if (code.hasBreakpointSite(site->lineOrBytecode())) {
+        RootedValue result(cx, UndefinedValue());
+        JSTrapStatus status = Debugger::onTrap(cx, &result);
+        if (status == JSTRAP_RETURN) {
+            // TODO properly handle JSTRAP_RETURN.
+            JS_ReportErrorASCII(cx, "Unexpected resumption value from breakpoint handler");
+            return false;
+        }
+        if (status != JSTRAP_CONTINUE)
+            return false;
+    }
+    return true;
+}
+
+static void
+WasmHandleThrow()
+{
+    WasmActivation* activation = JSContext::innermostWasmActivation();
+    MOZ_ASSERT(activation);
+    JSContext* cx = activation->cx();
+
+    for (FrameIterator iter(activation, FrameIterator::Unwind::True); !iter.done(); ++iter) {
+        if (!iter.debugEnabled())
+            continue;
+
+        DebugFrame* frame = iter.debugFrame();
+        frame->clearReturnJSValue();
+
+        // Assume JSTRAP_ERROR status if no exception is pending --
+        // no onExceptionUnwind handlers must be fired.
+        if (cx->isExceptionPending()) {
+            JSTrapStatus status = Debugger::onExceptionUnwind(cx, frame);
+            if (status == JSTRAP_RETURN) {
+                // Unexpected trap return -- raising error since throw recovery
+                // is not yet implemented in the wasm baseline.
+                // TODO properly handle JSTRAP_RETURN and resume wasm execution.
+                JS_ReportErrorASCII(cx, "Unexpected resumption value from onExceptionUnwind");
+            }
+        }
+
+        bool ok = Debugger::onLeaveFrame(cx, frame, nullptr, false);
+        if (ok) {
+            // Unexpected success from the handler onLeaveFrame -- raising error
+            // since throw recovery is not yet implemented in the wasm baseline.
+            // TODO properly handle success and resume wasm execution.
+            JS_ReportErrorASCII(cx, "Unexpected success from onLeaveFrame");
+        }
+        frame->leaveFrame(cx);
+     }
+}
+
 static void
 WasmReportTrap(int32_t trapIndex)
 {
-    JSContext* cx = JSRuntime::innermostWasmActivation()->cx();
+    JSContext* cx = JSContext::innermostWasmActivation()->cx();
 
     MOZ_ASSERT(trapIndex < int32_t(Trap::Limit) && trapIndex >= 0);
     Trap trap = Trap(trapIndex);
@@ -145,21 +247,21 @@ WasmReportTrap(int32_t trapIndex)
 static void
 WasmReportOutOfBounds()
 {
-    JSContext* cx = JSRuntime::innermostWasmActivation()->cx();
+    JSContext* cx = JSContext::innermostWasmActivation()->cx();
     JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_WASM_OUT_OF_BOUNDS);
 }
 
 static void
 WasmReportUnalignedAccess()
 {
-    JSContext* cx = JSRuntime::innermostWasmActivation()->cx();
+    JSContext* cx = JSContext::innermostWasmActivation()->cx();
     JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_WASM_UNALIGNED_ACCESS);
 }
 
 static int32_t
 CoerceInPlace_ToInt32(MutableHandleValue val)
 {
-    JSContext* cx = JSRuntime::innermostWasmActivation()->cx();
+    JSContext* cx = JSContext::innermostWasmActivation()->cx();
 
     int32_t i32;
     if (!ToInt32(cx, val, &i32))
@@ -172,7 +274,7 @@ CoerceInPlace_ToInt32(MutableHandleValue val)
 static int32_t
 CoerceInPlace_ToNumber(MutableHandleValue val)
 {
-    JSContext* cx = JSRuntime::innermostWasmActivation()->cx();
+    JSContext* cx = JSContext::innermostWasmActivation()->cx();
 
     double dbl;
     if (!ToNumber(cx, val, &dbl))
@@ -241,17 +343,31 @@ TruncateDoubleToUint64(double input)
 }
 
 static double
-Int64ToFloatingPoint(int32_t x_hi, uint32_t x_lo)
+Int64ToDouble(int32_t x_hi, uint32_t x_lo)
 {
     int64_t x = int64_t((uint64_t(x_hi) << 32)) + int64_t(x_lo);
     return double(x);
 }
 
+static float
+Int64ToFloat32(int32_t x_hi, uint32_t x_lo)
+{
+    int64_t x = int64_t((uint64_t(x_hi) << 32)) + int64_t(x_lo);
+    return float(x);
+}
+
 static double
-Uint64ToFloatingPoint(int32_t x_hi, uint32_t x_lo)
+Uint64ToDouble(int32_t x_hi, uint32_t x_lo)
 {
     uint64_t x = (uint64_t(x_hi) << 32) + uint64_t(x_lo);
     return double(x);
+}
+
+static float
+Uint64ToFloat32(int32_t x_hi, uint32_t x_lo)
+{
+    uint64_t x = (uint64_t(x_hi) << 32) + uint64_t(x_lo);
+    return float(x);
 }
 
 template <class F>
@@ -266,17 +382,19 @@ FuncCast(F* pf, ABIFunctionType type)
 }
 
 void*
-wasm::AddressOf(SymbolicAddress imm, ExclusiveContext* cx)
+wasm::AddressOf(SymbolicAddress imm, JSContext* cx)
 {
     switch (imm) {
-      case SymbolicAddress::Context:
-        return cx->contextAddressForJit();
-      case SymbolicAddress::InterruptUint32:
-        return cx->runtimeAddressOfInterruptUint32();
+      case SymbolicAddress::ContextPtr:
+        return cx->zone()->group()->addressOfOwnerContext();
       case SymbolicAddress::ReportOverRecursed:
         return FuncCast(WasmReportOverRecursed, Args_General0);
       case SymbolicAddress::HandleExecutionInterrupt:
         return FuncCast(WasmHandleExecutionInterrupt, Args_General0);
+      case SymbolicAddress::HandleDebugTrap:
+        return FuncCast(WasmHandleDebugTrap, Args_General0);
+      case SymbolicAddress::HandleThrow:
+        return FuncCast(WasmHandleThrow, Args_General0);
       case SymbolicAddress::ReportTrap:
         return FuncCast(WasmReportTrap, Args_General1);
       case SymbolicAddress::ReportOutOfBounds:
@@ -309,10 +427,14 @@ wasm::AddressOf(SymbolicAddress imm, ExclusiveContext* cx)
         return FuncCast(TruncateDoubleToUint64, Args_Int64_Double);
       case SymbolicAddress::TruncateDoubleToInt64:
         return FuncCast(TruncateDoubleToInt64, Args_Int64_Double);
-      case SymbolicAddress::Uint64ToFloatingPoint:
-        return FuncCast(Uint64ToFloatingPoint, Args_Double_IntInt);
-      case SymbolicAddress::Int64ToFloatingPoint:
-        return FuncCast(Int64ToFloatingPoint, Args_Double_IntInt);
+      case SymbolicAddress::Uint64ToDouble:
+        return FuncCast(Uint64ToDouble, Args_Double_IntInt);
+      case SymbolicAddress::Uint64ToFloat32:
+        return FuncCast(Uint64ToFloat32, Args_Float32_IntInt);
+      case SymbolicAddress::Int64ToDouble:
+        return FuncCast(Int64ToDouble, Args_Double_IntInt);
+      case SymbolicAddress::Int64ToFloat32:
+        return FuncCast(Int64ToFloat32, Args_Float32_IntInt);
 #if defined(JS_CODEGEN_ARM)
       case SymbolicAddress::aeabi_idivmod:
         return FuncCast(__aeabi_idivmod, Args_General2);
@@ -592,6 +714,132 @@ SigWithId::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const
     return Sig::sizeOfExcludingThis(mallocSizeOf);
 }
 
+size_t
+Import::serializedSize() const
+{
+    return module.serializedSize() +
+           field.serializedSize() +
+           sizeof(kind);
+}
+
+uint8_t*
+Import::serialize(uint8_t* cursor) const
+{
+    cursor = module.serialize(cursor);
+    cursor = field.serialize(cursor);
+    cursor = WriteScalar<DefinitionKind>(cursor, kind);
+    return cursor;
+}
+
+const uint8_t*
+Import::deserialize(const uint8_t* cursor)
+{
+    (cursor = module.deserialize(cursor)) &&
+    (cursor = field.deserialize(cursor)) &&
+    (cursor = ReadScalar<DefinitionKind>(cursor, &kind));
+    return cursor;
+}
+
+size_t
+Import::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const
+{
+    return module.sizeOfExcludingThis(mallocSizeOf) +
+           field.sizeOfExcludingThis(mallocSizeOf);
+}
+
+Export::Export(UniqueChars fieldName, uint32_t index, DefinitionKind kind)
+  : fieldName_(Move(fieldName))
+{
+    pod.kind_ = kind;
+    pod.index_ = index;
+}
+
+Export::Export(UniqueChars fieldName, DefinitionKind kind)
+  : fieldName_(Move(fieldName))
+{
+    pod.kind_ = kind;
+    pod.index_ = 0;
+}
+
+uint32_t
+Export::funcIndex() const
+{
+    MOZ_ASSERT(pod.kind_ == DefinitionKind::Function);
+    return pod.index_;
+}
+
+uint32_t
+Export::globalIndex() const
+{
+    MOZ_ASSERT(pod.kind_ == DefinitionKind::Global);
+    return pod.index_;
+}
+
+size_t
+Export::serializedSize() const
+{
+    return fieldName_.serializedSize() +
+           sizeof(pod);
+}
+
+uint8_t*
+Export::serialize(uint8_t* cursor) const
+{
+    cursor = fieldName_.serialize(cursor);
+    cursor = WriteBytes(cursor, &pod, sizeof(pod));
+    return cursor;
+}
+
+const uint8_t*
+Export::deserialize(const uint8_t* cursor)
+{
+    (cursor = fieldName_.deserialize(cursor)) &&
+    (cursor = ReadBytes(cursor, &pod, sizeof(pod)));
+    return cursor;
+}
+
+size_t
+Export::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const
+{
+    return fieldName_.sizeOfExcludingThis(mallocSizeOf);
+}
+
+size_t
+ElemSegment::serializedSize() const
+{
+    return sizeof(tableIndex) +
+           sizeof(offset) +
+           SerializedPodVectorSize(elemFuncIndices) +
+           SerializedPodVectorSize(elemCodeRangeIndices);
+}
+
+uint8_t*
+ElemSegment::serialize(uint8_t* cursor) const
+{
+    cursor = WriteBytes(cursor, &tableIndex, sizeof(tableIndex));
+    cursor = WriteBytes(cursor, &offset, sizeof(offset));
+    cursor = SerializePodVector(cursor, elemFuncIndices);
+    cursor = SerializePodVector(cursor, elemCodeRangeIndices);
+    return cursor;
+}
+
+const uint8_t*
+ElemSegment::deserialize(const uint8_t* cursor)
+{
+    (cursor = ReadBytes(cursor, &tableIndex, sizeof(tableIndex))) &&
+    (cursor = ReadBytes(cursor, &offset, sizeof(offset))) &&
+    (cursor = DeserializePodVector(cursor, &elemFuncIndices)) &&
+    (cursor = DeserializePodVector(cursor, &elemCodeRangeIndices));
+    return cursor;
+}
+
+size_t
+ElemSegment::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const
+{
+    return elemFuncIndices.sizeOfExcludingThis(mallocSizeOf) +
+           elemCodeRangeIndices.sizeOfExcludingThis(mallocSizeOf);
+}
+
 Assumptions::Assumptions(JS::BuildIdCharVector&& buildId)
   : cpuId(GetCPUID()),
     buildId(Move(buildId))
@@ -603,7 +851,7 @@ Assumptions::Assumptions()
 {}
 
 bool
-Assumptions::initBuildIdFromContext(ExclusiveContext* cx)
+Assumptions::initBuildIdFromContext(JSContext* cx)
 {
     if (!cx->buildIdOp() || !cx->buildIdOp()(&buildId)) {
         ReportOutOfMemory(cx);

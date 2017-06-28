@@ -169,6 +169,7 @@
     _(Hypot)                        \
     _(PowI)                         \
     _(PowD)                         \
+    _(PowV)                         \
     _(PowHalfD)                     \
     _(Random)                       \
     _(MathFunctionD)                \
@@ -242,6 +243,7 @@
     _(Lambda)                       \
     _(LambdaArrow)                  \
     _(LambdaForSingleton)           \
+    _(SetFunName)                   \
     _(KeepAliveObject)              \
     _(Slots)                        \
     _(Elements)                     \
@@ -317,6 +319,8 @@
     _(StoreFixedSlotV)              \
     _(StoreFixedSlotT)              \
     _(FunctionEnvironment)          \
+    _(NewLexicalEnvironmentObject)  \
+    _(CopyLexicalEnvironmentObject) \
     _(GetPropertyCacheV)            \
     _(GetPropertyCacheT)            \
     _(GetPropertyPolymorphicV)      \
@@ -401,6 +405,7 @@
     _(ArrowNewTarget)               \
     _(CheckReturn)                  \
     _(CheckIsObj)                   \
+    _(CheckIsCallable)              \
     _(CheckObjCoercible)            \
     _(DebugCheckSelfHosted)         \
     _(AsmJSLoadHeap)                \

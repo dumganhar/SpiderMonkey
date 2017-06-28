@@ -74,6 +74,27 @@ class Proxy
     static void trace(JSTracer* trc, JSObject* obj);
 };
 
+bool
+proxy_Call(JSContext* cx, unsigned argc, Value* vp);
+bool
+proxy_Construct(JSContext* cx, unsigned argc, Value* vp);
+
+// These functions are used by JIT code
+
+bool
+ProxyGetProperty(JSContext* cx, HandleObject proxy, HandleId id, MutableHandleValue vp);
+
+bool
+ProxyGetPropertyByValue(JSContext* cx, HandleObject proxy, HandleValue idVal,
+                        MutableHandleValue vp);
+
+bool
+ProxySetProperty(JSContext* cx, HandleObject proxy, HandleId id, HandleValue val, bool strict);
+
+bool
+ProxySetPropertyByValue(JSContext* cx, HandleObject proxy, HandleValue idVal, HandleValue val,
+                        bool strict);
+
 } /* namespace js */
 
 #endif /* proxy_Proxy_h */

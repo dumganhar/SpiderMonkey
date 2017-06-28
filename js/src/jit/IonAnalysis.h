@@ -25,6 +25,9 @@ MOZ_MUST_USE bool
 FoldTests(MIRGraph& graph);
 
 MOZ_MUST_USE bool
+FoldEmptyBlocks(MIRGraph& graph);
+
+MOZ_MUST_USE bool
 SplitCriticalEdges(MIRGraph& graph);
 
 bool
@@ -82,13 +85,13 @@ MOZ_MUST_USE bool
 BuildPhiReverseMapping(MIRGraph& graph);
 
 void
-AssertBasicGraphCoherency(MIRGraph& graph);
+AssertBasicGraphCoherency(MIRGraph& graph, bool force = false);
 
 void
-AssertGraphCoherency(MIRGraph& graph);
+AssertGraphCoherency(MIRGraph& graph, bool force = false);
 
 void
-AssertExtendedGraphCoherency(MIRGraph& graph, bool underValueNumberer = false);
+AssertExtendedGraphCoherency(MIRGraph& graph, bool underValueNumberer = false, bool force = false);
 
 MOZ_MUST_USE bool
 EliminateRedundantChecks(MIRGraph& graph);
@@ -196,7 +199,7 @@ MCompare*
 ConvertLinearInequality(TempAllocator& alloc, MBasicBlock* block, const LinearSum& sum);
 
 MOZ_MUST_USE bool
-AnalyzeNewScriptDefiniteProperties(JSContext* cx, JSFunction* fun,
+AnalyzeNewScriptDefiniteProperties(JSContext* cx, HandleFunction fun,
                                    ObjectGroup* group, HandlePlainObject baseobj,
                                    Vector<TypeNewScript::Initializer>* initializerList);
 

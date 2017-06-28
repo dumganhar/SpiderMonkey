@@ -309,6 +309,24 @@ MacroAssembler::add64(Imm64 imm, Register64 dest)
     ma_adc(imm.hi(), dest.high, scratch, LeaveCC);
 }
 
+CodeOffset
+MacroAssembler::add32ToPtrWithPatch(Register src, Register dest)
+{
+    ScratchRegisterScope scratch(*this);
+    CodeOffset offs = CodeOffset(currentOffset());
+    ma_movPatchable(Imm32(0), scratch, Always);
+    ma_add(src, scratch, dest);
+    return offs;
+}
+
+void
+MacroAssembler::patchAdd32ToPtr(CodeOffset offset, Imm32 imm)
+{
+    ScratchRegisterScope scratch(*this);
+    ma_mov_patch(imm, scratch, Always,
+                 HasMOVWT() ? L_MOVWT : L_LDR, offsetToInstruction(offset));
+}
+
 void
 MacroAssembler::addDouble(FloatRegister src, FloatRegister dest)
 {
@@ -652,9 +670,10 @@ void
 MacroAssembler::lshift64(Imm32 imm, Register64 dest)
 {
     MOZ_ASSERT(0 <= imm.value && imm.value < 64);
-    if (imm.value == 0) {
+    if (imm.value == 0)
         return;
-    } else if (imm.value < 32) {
+
+    if (imm.value < 32) {
         as_mov(dest.high, lsl(dest.high, imm.value));
         as_orr(dest.high, dest.high, lsr(dest.low, 32 - imm.value));
         as_mov(dest.low, lsl(dest.low, imm.value));
@@ -698,7 +717,8 @@ void
 MacroAssembler::rshiftPtr(Imm32 imm, Register dest)
 {
     MOZ_ASSERT(0 <= imm.value && imm.value < 32);
-    ma_lsr(imm, dest, dest);
+    if (imm.value)
+        ma_lsr(imm, dest, dest);
 }
 
 void
@@ -718,13 +738,16 @@ void
 MacroAssembler::rshiftPtrArithmetic(Imm32 imm, Register dest)
 {
     MOZ_ASSERT(0 <= imm.value && imm.value < 32);
-    ma_asr(imm, dest, dest);
+    if (imm.value)
+        ma_asr(imm, dest, dest);
 }
 
 void
 MacroAssembler::rshift64Arithmetic(Imm32 imm, Register64 dest)
 {
     MOZ_ASSERT(0 <= imm.value && imm.value < 64);
+    if (!imm.value)
+        return;
 
     if (imm.value < 32) {
         as_mov(dest.low, lsr(dest.low, imm.value));
@@ -784,6 +807,9 @@ MacroAssembler::rshift64(Imm32 imm, Register64 dest)
 {
     MOZ_ASSERT(0 <= imm.value && imm.value < 64);
     MOZ_ASSERT(0 <= imm.value && imm.value < 64);
+    if (!imm.value)
+        return;
+
     if (imm.value < 32) {
         as_mov(dest.low, lsr(dest.low, imm.value));
         as_orr(dest.low, dest.low, lsl(dest.high, 32 - imm.value));

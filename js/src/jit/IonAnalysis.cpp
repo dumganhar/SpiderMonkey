@@ -923,6 +923,42 @@ jit::FoldTests(MIRGraph& graph)
     return true;
 }
 
+bool
+jit::FoldEmptyBlocks(MIRGraph& graph)
+{
+    for (MBasicBlockIterator iter(graph.begin()); iter != graph.end(); ) {
+        MBasicBlock* block = *iter;
+        iter++;
+
+        if (block->numPredecessors() != 1 || block->numSuccessors() != 1)
+            continue;
+
+        if (!block->phisEmpty())
+            continue;
+
+        if (block->outerResumePoint())
+            continue;
+
+        if (*block->begin() != *block->rbegin())
+            continue;
+
+        MBasicBlock* succ = block->getSuccessor(0);
+        MBasicBlock* pred = block->getPredecessor(0);
+
+        if (succ->numPredecessors() != 1)
+            continue;
+
+        size_t pos = pred->getSuccessorIndex(block);
+        pred->lastIns()->replaceSuccessor(pos, succ);
+
+        graph.removeBlock(block);
+
+        succ->addPredecessorSameInputsAs(pred, block);
+        succ->removePredecessor(block);
+    }
+    return true;
+}
+
 static void
 EliminateTriviallyDeadResumePointOperands(MIRGraph& graph, MResumePoint* rp)
 {
@@ -965,16 +1001,22 @@ jit::EliminateDeadResumePointOperands(MIRGenerator* mir, MIRGraph& graph)
         if (mir->shouldCancel("Eliminate Dead Resume Point Operands (main loop)"))
             return false;
 
-        if (MResumePoint* rp = block->entryResumePoint())
+        if (MResumePoint* rp = block->entryResumePoint()) {
+            if (!graph.alloc().ensureBallast())
+                return false;
             EliminateTriviallyDeadResumePointOperands(graph, rp);
+        }
 
         // The logic below can get confused on infinite loops.
         if (block->isLoopHeader() && block->backedge() == *block)
             continue;
 
         for (MInstructionIterator ins = block->begin(); ins != block->end(); ins++) {
-            if (MResumePoint* rp = ins->resumePoint())
+            if (MResumePoint* rp = ins->resumePoint()) {
+                if (!graph.alloc().ensureBallast())
+                    return false;
                 EliminateTriviallyDeadResumePointOperands(graph, rp);
+            }
 
             // No benefit to replacing constant operands with other constants.
             if (ins->isConstant())
@@ -2264,11 +2306,7 @@ jit::AccountForCFGChanges(MIRGenerator* mir, MIRGraph& graph, bool updateAliasAn
 
     // If needed, update alias analysis dependencies.
     if (updateAliasAnalysis) {
-        TraceLoggerThread* logger;
-        if (GetJitContext()->onMainThread())
-            logger = TraceLoggerForMainThread(GetJitContext()->runtime);
-        else
-            logger = TraceLoggerForCurrentThread();
+        TraceLoggerThread* logger = TraceLoggerForCurrentThread();
         AutoTraceLog log(logger, TraceLogger_AliasAnalysis);
 
         if (JitOptions.disableFlowAA) {
@@ -2610,11 +2648,12 @@ CheckOperand(const MNode* consumer, const MUse* use, int32_t* usesBalance)
     MOZ_ASSERT(producer->block() != nullptr);
     MOZ_ASSERT(use->consumer() == consumer);
 #ifdef _DEBUG_CHECK_OPERANDS_USES_BALANCE
-    fprintf(stderr, "==Check Operand\n");
-    use->producer()->dump(stderr);
-    fprintf(stderr, "  index: %" PRIuSIZE "\n", use->consumer()->indexOf(use));
-    use->consumer()->dump(stderr);
-    fprintf(stderr, "==End\n");
+    Fprinter print(stderr);
+    print.printf("==Check Operand\n");
+    use->producer()->dump(print);
+    print.printf("  index: %" PRIuSIZE "\n", use->consumer()->indexOf(use));
+    use->consumer()->dump(print);
+    print.printf("==End\n");
 #endif
     --*usesBalance;
 }
@@ -2628,11 +2667,12 @@ CheckUse(const MDefinition* producer, const MUse* use, int32_t* usesBalance)
     MOZ_ASSERT(use->consumer()->block() != nullptr);
     MOZ_ASSERT(use->consumer()->getOperand(use->index()) == producer);
 #ifdef _DEBUG_CHECK_OPERANDS_USES_BALANCE
-    fprintf(stderr, "==Check Use\n");
-    use->producer()->dump(stderr);
-    fprintf(stderr, "  index: %" PRIuSIZE "\n", use->consumer()->indexOf(use));
-    use->consumer()->dump(stderr);
-    fprintf(stderr, "==End\n");
+    Fprinter print(stderr);
+    print.printf("==Check Use\n");
+    use->producer()->dump(print);
+    print.printf("  index: %" PRIuSIZE "\n", use->consumer()->indexOf(use));
+    use->consumer()->dump(print);
+    print.printf("==End\n");
 #endif
     ++*usesBalance;
 }
@@ -2665,9 +2705,12 @@ AssertOperandsBeforeSafeInsertTop(MResumePoint* resume)
 #endif // DEBUG
 
 void
-jit::AssertBasicGraphCoherency(MIRGraph& graph)
+jit::AssertBasicGraphCoherency(MIRGraph& graph, bool force)
 {
 #ifdef DEBUG
+    if (!JitOptions.fullDebugChecks && !force)
+        return;
+
     MOZ_ASSERT(graph.entryBlock()->numPredecessors() == 0);
     MOZ_ASSERT(graph.entryBlock()->phisEmpty());
     MOZ_ASSERT(!graph.entryBlock()->unreachable());
@@ -2850,12 +2893,14 @@ AssertDominatorTree(MIRGraph& graph)
 #endif
 
 void
-jit::AssertGraphCoherency(MIRGraph& graph)
+jit::AssertGraphCoherency(MIRGraph& graph, bool force)
 {
 #ifdef DEBUG
     if (!JitOptions.checkGraphConsistency)
         return;
-    AssertBasicGraphCoherency(graph);
+    if (!JitOptions.fullDebugChecks && !force)
+        return;
+    AssertBasicGraphCoherency(graph, force);
     AssertReversePostorder(graph);
 #endif
 }
@@ -2939,7 +2984,7 @@ AssertResumePointDominatedByOperands(MResumePoint* resume)
 #endif // DEBUG
 
 void
-jit::AssertExtendedGraphCoherency(MIRGraph& graph, bool underValueNumberer)
+jit::AssertExtendedGraphCoherency(MIRGraph& graph, bool underValueNumberer, bool force)
 {
     // Checks the basic GraphCoherency but also other conditions that
     // do not hold immediately (such as the fact that critical edges
@@ -2948,8 +2993,10 @@ jit::AssertExtendedGraphCoherency(MIRGraph& graph, bool underValueNumberer)
 #ifdef DEBUG
     if (!JitOptions.checkGraphConsistency)
         return;
+    if (!JitOptions.fullDebugChecks && !force)
+        return;
 
-    AssertGraphCoherency(graph);
+    AssertGraphCoherency(graph, force);
 
     AssertDominatorTree(graph);
 
@@ -2999,12 +3046,6 @@ jit::AssertExtendedGraphCoherency(MIRGraph& graph, bool underValueNumberer)
         for (MPhiIterator iter(block->phisBegin()), end(block->phisEnd()); iter != end; ++iter) {
             MPhi* phi = *iter;
             for (size_t i = 0, e = phi->numOperands(); i < e; ++i) {
-                // We sometimes see a phi with a magic-optimized-arguments
-                // operand defined in the normal entry block, while the phi is
-                // also reachable from the OSR entry (auto-regress/bug779818.js)
-                if (phi->getOperand(i)->type() == MIRType::MagicOptimizedArguments)
-                    continue;
-
                 MOZ_ASSERT(phi->getOperand(i)->block()->dominates(block->getPredecessor(i)),
                            "Phi input is not dominated by its operand");
             }
@@ -4038,7 +4079,7 @@ AnalyzePoppedThis(JSContext* cx, ObjectGroup* group,
         // Add the property to the object, being careful not to update type information.
         DebugOnly<unsigned> slotSpan = baseobj->slotSpan();
         MOZ_ASSERT(!baseobj->containsPure(id));
-        if (!baseobj->addDataProperty(cx, id, baseobj->slotSpan(), JSPROP_ENUMERATE))
+        if (!NativeObject::addDataProperty(cx, baseobj, id, baseobj->slotSpan(), JSPROP_ENUMERATE))
             return false;
         MOZ_ASSERT(baseobj->slotSpan() != slotSpan);
         MOZ_ASSERT(!baseobj->inDictionaryMode());
@@ -4115,7 +4156,7 @@ CmpInstructions(const void* a, const void* b)
 }
 
 bool
-jit::AnalyzeNewScriptDefiniteProperties(JSContext* cx, JSFunction* fun,
+jit::AnalyzeNewScriptDefiniteProperties(JSContext* cx, HandleFunction fun,
                                         ObjectGroup* group, HandlePlainObject baseobj,
                                         Vector<TypeNewScript::Initializer>* initializerList)
 {
@@ -4125,7 +4166,7 @@ jit::AnalyzeNewScriptDefiniteProperties(JSContext* cx, JSFunction* fun,
     // which will definitely be added to the created object before it has a
     // chance to escape and be accessed elsewhere.
 
-    RootedScript script(cx, fun->getOrCreateScript(cx));
+    RootedScript script(cx, JSFunction::getOrCreateScript(cx, fun));
     if (!script)
         return false;
 
@@ -4136,8 +4177,8 @@ jit::AnalyzeNewScriptDefiniteProperties(JSContext* cx, JSFunction* fun,
     if (script->length() > MAX_SCRIPT_SIZE)
         return true;
 
-    TraceLoggerThread* logger = TraceLoggerForMainThread(cx->runtime());
-    TraceLoggerEvent event(logger, TraceLogger_AnnotateScripts, script);
+    TraceLoggerThread* logger = TraceLoggerForCurrentThread(cx);
+    TraceLoggerEvent event(TraceLogger_AnnotateScripts, script);
     AutoTraceLog logScript(logger, event);
     AutoTraceLog logCompile(logger, TraceLogger_IonAnalysis);
 
@@ -4188,11 +4229,13 @@ jit::AnalyzeNewScriptDefiniteProperties(JSContext* cx, JSFunction* fun,
     IonBuilder builder(cx, CompileCompartment::get(cx->compartment()), options, &temp, &graph, constraints,
                        &inspector, &info, optimizationInfo, /* baselineFrame = */ nullptr);
 
-    if (!builder.build()) {
-        if (cx->isThrowingOverRecursed() ||
-            cx->isThrowingOutOfMemory() ||
-            builder.abortReason() == AbortReason_Alloc)
-        {
+    AbortReasonOr<Ok> buildResult = builder.build();
+    if (buildResult.isErr()) {
+        AbortReason reason = buildResult.unwrapErr();
+        if (cx->isThrowingOverRecursed() || cx->isThrowingOutOfMemory())
+            return false;
+        if (reason == AbortReason::Alloc) {
+            ReportOutOfMemory(cx);
             return false;
         }
         MOZ_ASSERT(!cx->isExceptionPending());
@@ -4371,8 +4414,14 @@ jit::AnalyzeArgumentsUsage(JSContext* cx, JSScript* scriptArg)
     // direct eval is present.
     //
     // FIXME: Don't build arguments for ES6 generator expressions.
-    if (scriptArg->isDebuggee() || script->isGenerator() || script->bindingsAccessedDynamically())
+    if (scriptArg->isDebuggee() ||
+        script->isStarGenerator() ||
+        script->isLegacyGenerator() ||
+        script->isAsync() ||
+        script->bindingsAccessedDynamically())
+    {
         return true;
+    }
 
     if (!jit::IsIonEnabled(cx))
         return true;
@@ -4384,8 +4433,8 @@ jit::AnalyzeArgumentsUsage(JSContext* cx, JSScript* scriptArg)
     if (!script->ensureHasTypes(cx))
         return false;
 
-    TraceLoggerThread* logger = TraceLoggerForMainThread(cx->runtime());
-    TraceLoggerEvent event(logger, TraceLogger_AnnotateScripts, script);
+    TraceLoggerThread* logger = TraceLoggerForCurrentThread(cx);
+    TraceLoggerEvent event(TraceLogger_AnnotateScripts, script);
     AutoTraceLog logScript(logger, event);
     AutoTraceLog logCompile(logger, TraceLogger_IonAnalysis);
 
@@ -4426,9 +4475,15 @@ jit::AnalyzeArgumentsUsage(JSContext* cx, JSScript* scriptArg)
     IonBuilder builder(nullptr, CompileCompartment::get(cx->compartment()), options, &temp, &graph, constraints,
                        &inspector, &info, optimizationInfo, /* baselineFrame = */ nullptr);
 
-    if (!builder.build()) {
-        if (cx->isThrowingOverRecursed() || builder.abortReason() == AbortReason_Alloc)
+    AbortReasonOr<Ok> buildResult = builder.build();
+    if (buildResult.isErr()) {
+        AbortReason reason = buildResult.unwrapErr();
+        if (cx->isThrowingOverRecursed() || cx->isThrowingOutOfMemory())
             return false;
+        if (reason == AbortReason::Alloc) {
+            ReportOutOfMemory(cx);
+            return false;
+        }
         MOZ_ASSERT(!cx->isExceptionPending());
         return true;
     }
@@ -4512,6 +4567,7 @@ jit::MarkLoopBlocks(MIRGraph& graph, MBasicBlock* header, bool* canOsr)
         // A block not marked by the time we reach it is not in the loop.
         if (!block->isMarked())
             continue;
+
         // This block is in the loop; trace to its predecessors.
         for (size_t p = 0, e = block->numPredecessors(); p != e; ++p) {
             MBasicBlock* pred = block->getPredecessor(p);
@@ -4546,7 +4602,7 @@ jit::MarkLoopBlocks(MIRGraph& graph, MBasicBlock* header, bool* canOsr)
 
                     // If the nested loop is not contiguous, we may have already
                     // passed its backedge. If this happens, back up.
-                    if (backedge->id() > block->id()) {
+                    if (innerBackedge->id() > block->id()) {
                         i = graph.poBegin(innerBackedge);
                         --i;
                     }

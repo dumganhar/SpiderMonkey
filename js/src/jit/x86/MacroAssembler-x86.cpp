@@ -62,7 +62,7 @@ MacroAssemblerX86::convertUInt64ToDouble(Register64 src, FloatRegister dest, Reg
 
         fstp(Operand(esp, 0));
         vmovsd(Address(esp, 0), dest);
-        asMasm().freeStack(2*sizeof(intptr_t));
+        asMasm().freeStack(2 * sizeof(intptr_t));
         return;
     }
 
@@ -111,7 +111,7 @@ MacroAssemblerX86::convertUInt64ToDouble(Register64 src, FloatRegister dest, Reg
 }
 
 void
-MacroAssemblerX86::loadConstantDouble(wasm::RawF64 d, FloatRegister dest)
+MacroAssemblerX86::loadConstantDouble(double d, FloatRegister dest)
 {
     if (maybeInlineDouble(d, dest))
         return;
@@ -123,13 +123,7 @@ MacroAssemblerX86::loadConstantDouble(wasm::RawF64 d, FloatRegister dest)
 }
 
 void
-MacroAssemblerX86::loadConstantDouble(double d, FloatRegister dest)
-{
-    loadConstantDouble(wasm::RawF64(d), dest);
-}
-
-void
-MacroAssemblerX86::loadConstantFloat32(wasm::RawF32 f, FloatRegister dest)
+MacroAssemblerX86::loadConstantFloat32(float f, FloatRegister dest)
 {
     if (maybeInlineFloat(f, dest))
         return;
@@ -138,12 +132,6 @@ MacroAssemblerX86::loadConstantFloat32(wasm::RawF32 f, FloatRegister dest)
         return;
     masm.vmovss_mr(nullptr, dest.encoding());
     propagateOOM(flt->uses.append(CodeOffset(masm.size())));
-}
-
-void
-MacroAssemblerX86::loadConstantFloat32(float f, FloatRegister dest)
-{
-    loadConstantFloat32(wasm::RawF32(f), dest);
 }
 
 void
@@ -179,7 +167,7 @@ MacroAssemblerX86::finish()
         CodeOffset cst(masm.currentOffset());
         for (CodeOffset use : d.uses)
             addCodeLabel(CodeLabel(use, cst));
-        masm.int64Constant(d.value);
+        masm.doubleConstant(d.value);
         if (!enoughMemory_)
             return;
     }
@@ -190,7 +178,7 @@ MacroAssemblerX86::finish()
         CodeOffset cst(masm.currentOffset());
         for (CodeOffset use : f.uses)
             addCodeLabel(CodeLabel(use, cst));
-        masm.int32Constant(f.value);
+        masm.floatConstant(f.value);
         if (!enoughMemory_)
             return;
     }
@@ -280,7 +268,7 @@ MacroAssemblerX86::handleFailureWithHandlerTail(void* handler)
     {
         Label skipProfilingInstrumentation;
         // Test if profiler enabled.
-        AbsoluteAddress addressOfEnabled(GetJitContext()->runtime->spsProfiler().addressOfEnabled());
+        AbsoluteAddress addressOfEnabled(GetJitContext()->runtime->geckoProfiler().addressOfEnabled());
         asMasm().branch32(Assembler::Equal, addressOfEnabled, Imm32(0),
                           &skipProfilingInstrumentation);
         profilerExitFrame();
@@ -300,8 +288,8 @@ MacroAssemblerX86::handleFailureWithHandlerTail(void* handler)
 void
 MacroAssemblerX86::profilerEnterFrame(Register framePtr, Register scratch)
 {
-    AbsoluteAddress activation(GetJitContext()->runtime->addressOfProfilingActivation());
-    loadPtr(activation, scratch);
+    asMasm().loadJSContext(scratch);
+    loadPtr(Address(scratch, offsetof(JSContext, profilingActivation_)), scratch);
     storePtr(framePtr, Address(scratch, JitActivation::offsetOfLastProfilingFrame()));
     storePtr(ImmPtr(nullptr), Address(scratch, JitActivation::offsetOfLastProfilingCallSite()));
 }
@@ -331,15 +319,41 @@ MacroAssembler::subFromStackPtr(Imm32 imm32)
         // On windows, we cannot skip very far down the stack without touching the
         // memory pages in-between.  This is a corner-case code for situations where the
         // Ion frame data for a piece of code is very large.  To handle this special case,
-        // for frames over 1k in size we allocate memory on the stack incrementally, touching
+        // for frames over 4k in size we allocate memory on the stack incrementally, touching
         // it as we go.
+        //
+        // When the amount is quite large, which it can be, we emit an actual loop, in order
+        // to keep the function prologue compact.  Compactness is a requirement for eg
+        // Wasm's CodeRange data structure, which can encode only 8-bit offsets.
         uint32_t amountLeft = imm32.value;
-        while (amountLeft > 4096) {
+        uint32_t fullPages = amountLeft / 4096;
+        if (fullPages <= 8) {
+            while (amountLeft > 4096) {
+                subl(Imm32(4096), StackPointer);
+                store32(Imm32(0), Address(StackPointer, 0));
+                amountLeft -= 4096;
+            }
+            subl(Imm32(amountLeft), StackPointer);
+        } else {
+            // Save scratch register.
+            push(eax);
+            amountLeft -= 4;
+            fullPages = amountLeft / 4096;
+
+            Label top;
+            move32(Imm32(fullPages), eax);
+            bind(&top);
             subl(Imm32(4096), StackPointer);
             store32(Imm32(0), Address(StackPointer, 0));
-            amountLeft -= 4096;
+            subl(Imm32(1), eax);
+            j(Assembler::NonZero, &top);
+            amountLeft -= fullPages * 4096;
+            if (amountLeft)
+                subl(Imm32(amountLeft), StackPointer);
+
+            // Restore scratch register.
+            movl(Operand(StackPointer, uint32_t(imm32.value) - 4), eax);
         }
-        subl(Imm32(amountLeft), StackPointer);
     }
 }
 
@@ -499,8 +513,8 @@ MacroAssembler::branchTestValue(Condition cond, const ValueOperand& lhs,
                                 const Value& rhs, Label* label)
 {
     MOZ_ASSERT(cond == Equal || cond == NotEqual);
-    if (rhs.isMarkable())
-        cmpPtr(lhs.payloadReg(), ImmGCPtr(rhs.toMarkablePointer()));
+    if (rhs.isGCThing())
+        cmpPtr(lhs.payloadReg(), ImmGCPtr(rhs.toGCThing()));
     else
         cmpPtr(lhs.payloadReg(), ImmWord(rhs.toNunboxPayload()));
 
@@ -889,21 +903,59 @@ MacroAssemblerX86::convertInt64ToDouble(Register64 input, FloatRegister output)
 
     fstp(Operand(esp, 0));
     vmovsd(Address(esp, 0), output);
-    asMasm().freeStack(2*sizeof(intptr_t));
+    asMasm().freeStack(2 * sizeof(intptr_t));
 }
 
 void
 MacroAssemblerX86::convertInt64ToFloat32(Register64 input, FloatRegister output)
 {
-    convertInt64ToDouble(input, output);
-    convertDoubleToFloat32(output, output);
+    // Zero the output register to break dependencies, see convertInt32ToDouble.
+    zeroDouble(output);
+
+    asMasm().Push(input.high);
+    asMasm().Push(input.low);
+    fild(Operand(esp, 0));
+
+    fstp32(Operand(esp, 0));
+    vmovss(Address(esp, 0), output);
+    asMasm().freeStack(2 * sizeof(intptr_t));
 }
 
 void
 MacroAssemblerX86::convertUInt64ToFloat32(Register64 input, FloatRegister output, Register temp)
 {
-    convertUInt64ToDouble(input, output.asDouble(), temp);
-    convertDoubleToFloat32(output, output);
+    // Zero the dest register to break dependencies, see convertInt32ToDouble.
+    zeroDouble(output);
+
+    // Set the FPU precision to 80 bits.
+    asMasm().reserveStack(2 * sizeof(intptr_t));
+    fnstcw(Operand(esp, 0));
+    load32(Operand(esp, 0), temp);
+    orl(Imm32(0x300), temp);
+    store32(temp, Operand(esp, sizeof(intptr_t)));
+    fldcw(Operand(esp, sizeof(intptr_t)));
+
+    asMasm().Push(input.high);
+    asMasm().Push(input.low);
+    fild(Operand(esp, 0));
+
+    Label notNegative;
+    asMasm().branch32(Assembler::NotSigned, input.high, Imm32(0), &notNegative);
+    double add_constant = 18446744073709551616.0; // 2^64
+    uint64_t add_constant_u64 = mozilla::BitwiseCast<uint64_t>(add_constant);
+    store64(Imm64(add_constant_u64), Address(esp, 0));
+
+    fld(Operand(esp, 0));
+    faddp();
+    bind(&notNegative);
+
+    fstp32(Operand(esp, 0));
+    vmovss(Address(esp, 0), output);
+    asMasm().freeStack(2 * sizeof(intptr_t));
+
+    // Restore FPU precision to the initial value.
+    fldcw(Operand(esp, 0));
+    asMasm().freeStack(2 * sizeof(intptr_t));
 }
 
 void

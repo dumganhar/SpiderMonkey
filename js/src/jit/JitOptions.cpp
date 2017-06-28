@@ -105,6 +105,9 @@ DefaultJitOptions::DefaultJitOptions()
     // Toggles whether Loop Unrolling is globally disabled.
     SET_DEFAULT(disableLoopUnrolling, true);
 
+    // Toggles wheter optimization tracking is globally disabled.
+    SET_DEFAULT(disableOptimizationTracking, true);
+
     // Toggle whether Profile Guided Optimization is globally disabled.
     SET_DEFAULT(disablePgo, false);
 
@@ -163,6 +166,10 @@ DefaultJitOptions::DefaultJitOptions()
     // Number of bailouts without invalidation before we set
     // JSScript::hadFrequentBailouts and invalidate.
     SET_DEFAULT(frequentBailoutThreshold, 10);
+
+    // Whether to run all debug checks in debug builds.
+    // Disabling might make it more enjoyable to run JS in debug builds.
+    SET_DEFAULT(fullDebugChecks, true);
 
     // How many actual arguments are accepted on the C stack.
     SET_DEFAULT(maxStackArgs, 4096);
@@ -236,6 +243,12 @@ DefaultJitOptions::DefaultJitOptions()
     // Toggles the optimization whereby offsets are folded into loads and not
     // included in the bounds check.
     SET_DEFAULT(wasmFoldOffsets, true);
+
+    // Until which wasm bytecode size should we accumulate functions, in order
+    // to compile efficiently on helper threads. Baseline code compiles much
+    // faster than Ion code so use scaled thresholds (see also bug 1320374).
+    SET_DEFAULT(wasmBatchBaselineThreshold, 10000);
+    SET_DEFAULT(wasmBatchIonThreshold, 1100);
 
     // Determines whether we suppress using signal handlers
     // for interrupting jit-ed code. This is used only for testing.

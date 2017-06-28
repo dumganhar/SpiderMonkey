@@ -420,14 +420,6 @@ ThrowingOperation(JSContext* cx, HandleValue v);
 bool
 GetProperty(JSContext* cx, HandleValue value, HandlePropertyName name, MutableHandleValue vp);
 
-bool
-GetEnvironmentName(JSContext* cx, HandleObject obj, HandlePropertyName name,
-                   MutableHandleValue vp);
-
-bool
-GetEnvironmentNameForTypeOf(JSContext* cx, HandleObject obj, HandlePropertyName name,
-                            MutableHandleValue vp);
-
 JSObject*
 Lambda(JSContext* cx, HandleFunction fun, HandleObject parent);
 
@@ -562,11 +554,20 @@ ReportRuntimeRedeclaration(JSContext* cx, HandlePropertyName name, const char* r
 
 enum class CheckIsObjectKind : uint8_t {
     IteratorNext,
+    IteratorReturn,
+    IteratorThrow,
     GetIterator
 };
 
 bool
 ThrowCheckIsObject(JSContext* cx, CheckIsObjectKind kind);
+
+enum class CheckIsCallableKind : uint8_t {
+    IteratorReturn
+};
+
+bool
+ThrowCheckIsCallable(JSContext* cx, CheckIsCallableKind kind);
 
 bool
 ThrowUninitializedThis(JSContext* cx, AbstractFramePtr frame);
