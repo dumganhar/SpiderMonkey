@@ -18,13 +18,14 @@ python ../configure.py \
 # make
 xcrun make -j$cpus
 
-rm -f ./dist/sdk/lib/libmozglue.a
-cp ./mozglue/build/libmozglue.a ./dist/sdk/lib/
-cp ./js/src/libjs_static.a ./dist/sdk/lib/
+rm -rf ./dist/libs
+mkdir -p ./dist/libs
+cp ./mozglue/build/libmozglue.a ./dist/libs/
+cp ./js/src/libjs_static.a ./dist/libs/
 
 # strip
-xcrun strip -S ./dist/sdk/lib/libjs_static.a
-xcrun strip -S ./dist/sdk/lib/libmozglue.a
+xcrun strip -S ./dist/libs/libjs_static.a
+xcrun strip -S ./dist/libs/libmozglue.a
 
 rm -rf ./dist-osx
 cp -pr ./dist ./dist-osx
