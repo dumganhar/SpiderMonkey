@@ -1306,12 +1306,12 @@ ProcessHasSignalHandlers()
     // in Bionic's pthread_join which causes pthread_join to return early when
     // pthread_kill is used (on any thread). Nobody expects the pthread_cond_wait
     // EINTRquisition.
-    char version_string[PROP_VALUE_MAX];
-    PodArrayZero(version_string);
-    if (__system_property_get("ro.build.version.sdk", version_string) > 0) {
-        if (atol(version_string) < 19)
+    // char version_string[PROP_VALUE_MAX];
+    // PodArrayZero(version_string);
+    // if (__system_property_get("ro.build.version.sdk", version_string) > 0) {
+    //     if (atol(version_string) < 19)
             return false;
-    }
+    // }
 # if defined(MOZ_LINKER)
     // Signal handling is broken on some android systems.
     if (IsSignalHandlingBroken())

@@ -1,37 +1,6 @@
 
 # options
-develop=
-release=
-RELEASE_DIR="spidermonkey-android"
-
-usage(){
-cat << EOF
-usage: $0 [options]
-
-Build SpiderMonkey using Android NDK
-
-OPTIONS:
--d  Build for development
--r  Build for release. specify RELEASE_DIR.
--h  this help
-
-EOF
-}
-
-while getopts "drh" OPTION; do
-case "$OPTION" in
-d)
-develop=1
-;;
-r)
-release=1
-;;
-h)
-usage
-exit 0
-;;
-esac
-done
+RELEASE_DIR="dist-android"
 
 set -x
 
@@ -40,10 +9,12 @@ host_arch=`uname -m`
 
 export OLD_CONFIGURE=../js/src/old-configure
 
+rm -rf $RELEASE_DIR
+
 build_with_arch()
 {
 
-#NDK_ROOT=$HOME/bin/android-ndk
+# NDK_ROOT=$HOME/bin/android-ndk
 if [[ ! $NDK_ROOT ]]; then
     echo "You have to define NDK_ROOT"
     exit 1
@@ -67,35 +38,25 @@ python ../configure.py \
             --enable-install-strip \
             --disable-debug \
             --without-intl-api \
-            --with-system-zlib
-
+            --with-system-zlib \
+            ${EXTRA_ARGS}
 
 make -j8
 
-if [[ $develop ]]; then
-    rm ../../../include
-    rm ../../../lib
-
-    ln -s -f "$PWD"/dist/include ../../..
-    ln -s -f "$PWD"/dist/lib ../../..
-fi
-
-if [[ $release ]]; then
 # copy specific files from dist
-    rm -r "$RELEASE_DIR/include"
-    rm -r "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR"
-    mkdir -p "$RELEASE_DIR/include"
-    cp -RL dist/include/* "$RELEASE_DIR/include/"
-    mkdir -p "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR"
-    cp -L js/src/libjs_static.a "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libjs_static.a"
-    cp -L dist/sdk/lib/libmozglue.a "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libmozglue.a"
+rm -rf "$RELEASE_DIR/$RELEASE_ARCH_DIR/include"
+rm -rf "$RELEASE_DIR/$RELEASE_ARCH_DIR/libs"
+mkdir -p "$RELEASE_DIR/$RELEASE_ARCH_DIR/include"
+cp -RL dist/include/* "$RELEASE_DIR/$RELEASE_ARCH_DIR/include/"
+mkdir -p "$RELEASE_DIR/$RELEASE_ARCH_DIR/libs"
+cp -L js/src/libjs_static.a "$RELEASE_DIR/$RELEASE_ARCH_DIR/libs/libjs_static.a"
+cp -L dist/sdk/lib/libmozglue.a "$RELEASE_DIR/$RELEASE_ARCH_DIR/libs/libmozglue.a"
 
 # strip unneeded symbols
-    STRIP=$HOME/bin/android-ndk/toolchains/${TOOLS_ARCH}-${GCC_VERSION}/prebuilt/${host_os}-${host_arch}/bin/${TOOLNAME_PREFIX}-strip
+STRIP=$NDK_ROOT/toolchains/${TOOLS_ARCH}-${GCC_VERSION}/prebuilt/${host_os}-${host_arch}/bin/${TOOLNAME_PREFIX}-strip
 
-    $STRIP --strip-unneeded "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libjs_static.a"
-    $STRIP --strip-unneeded "$RELEASE_DIR/lib/$RELEASE_ARCH_DIR/libmozglue.a"
-fi
+$STRIP --strip-unneeded "$RELEASE_DIR/$RELEASE_ARCH_DIR/libs/libjs_static.a"
+$STRIP --strip-unneeded "$RELEASE_DIR/$RELEASE_ARCH_DIR/libs/libmozglue.a"
 
 }
 
@@ -105,7 +66,7 @@ TARGET_NAME=arm-linux-androideabi
 CPU_ARCH=armv6
 RELEASE_ARCH_DIR=armeabi
 GCC_VERSION=4.9
-ANDROID_VERSION=10
+ANDROID_VERSION=9
 TOOLNAME_PREFIX=arm-linux-androideabi
 build_with_arch
 
@@ -115,7 +76,7 @@ TARGET_NAME=arm-linux-androideabi
 CPU_ARCH=armv7-a
 RELEASE_ARCH_DIR=armeabi-v7a
 GCC_VERSION=4.9
-ANDROID_VERSION=10
+ANDROID_VERSION=9
 TOOLNAME_PREFIX=arm-linux-androideabi
 build_with_arch
 
@@ -127,6 +88,7 @@ RELEASE_ARCH_DIR=arm64-v8a
 GCC_VERSION=4.9
 ANDROID_VERSION=21
 TOOLNAME_PREFIX=aarch64-linux-android
+EXTRA_ARGS=--disable-jemalloc
 build_with_arch
 
 
@@ -136,6 +98,6 @@ TARGET_NAME=i686-linux-android
 CPU_ARCH=i686
 RELEASE_ARCH_DIR=x86
 GCC_VERSION=4.9
-ANDROID_VERSION=10
+ANDROID_VERSION=9
 TOOLNAME_PREFIX=i686-linux-android
 build_with_arch
