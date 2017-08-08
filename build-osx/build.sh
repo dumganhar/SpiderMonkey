@@ -12,7 +12,8 @@ python ../configure.py \
             --disable-tests \
             --disable-debug \
             --with-thumb=no \
-            --without-intl-api
+            --without-intl-api \
+            --disable-jemalloc
             
 
 # make
