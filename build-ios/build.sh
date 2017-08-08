@@ -4,7 +4,6 @@
 ## usually in build-ios
 
 MIN_IOS_VERSION=7.0
-IOS_SDK=10.3
 
 LIPO="xcrun -sdk iphoneos lipo"
 STRIP="xcrun -sdk iphoneos strip"
