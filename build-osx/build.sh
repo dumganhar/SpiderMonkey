@@ -21,7 +21,7 @@ xcrun make -j$cpus
 rm -rf ./dist/libs
 mkdir -p ./dist/libs
 cp ./mozglue/build/libmozglue.a ./dist/libs/
-cp ./js/src/libjs_static.a ./dist/libs/
+cp ./js/src/build/libjs_static.a ./dist/libs/
 
 # strip
 xcrun strip -S ./dist/libs/libjs_static.a
