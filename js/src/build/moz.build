@@ -19,7 +19,7 @@ if not CONFIG['JS_STANDALONE']:
 #
 # In fact, we now build both a static and a shared library, as the
 # JS shell would like to link to the static library.
- 
+
 if CONFIG['JS_SHARED_LIBRARY']:
     GeckoSharedLibrary('js', linkage=None)
     SHARED_LIBRARY_NAME = CONFIG['JS_LIBRARY_NAME']
