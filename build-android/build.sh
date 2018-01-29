@@ -28,9 +28,8 @@ python ../configure.py \
             --with-android-ndk=$NDK_ROOT \
             --with-android-sdk=$HOME/bin/android-sdk \
             --with-android-version=${ANDROID_VERSION} \
-            --with-android-gnu-compiler-version=${GCC_VERSION} \
+            --with-android-platform=
             --with-arch=${CPU_ARCH} \
-            --with-android-cxx-stl=libstdc++ \
             --target=${TARGET_NAME} \
             --disable-shared-js \
             --disable-tests \
@@ -76,7 +75,7 @@ TARGET_NAME=arm-linux-androideabi
 CPU_ARCH=armv7-a
 RELEASE_ARCH_DIR=armeabi-v7a
 GCC_VERSION=4.9
-ANDROID_VERSION=9
+ANDROID_VERSION=14
 TOOLNAME_PREFIX=arm-linux-androideabi
 build_with_arch
 
