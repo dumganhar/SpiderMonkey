@@ -6,8 +6,7 @@
 
 # Build mozglue as a shared lib on Windows, OSX and Android.
 # If this is ever changed, update MOZ_SHARED_MOZGLUE in browser/installer/Makefile.in
-# If JS_STANDALONE, always build as static.
-if CONFIG['OS_TARGET'] in ('WINNT', 'Darwin', 'Android') and not CONFIG['JS_STANDALONE']:
+if CONFIG['OS_TARGET'] in ('WINNT', 'Darwin', 'Android'):
     SharedLibrary('mozglue')
 else:
     Library('mozglue')
@@ -29,7 +28,7 @@ if CONFIG['OS_TARGET'] == 'WINNT':
         'user32.dll',
     ]
 
-if not CONFIG['JS_STANDALONE']:
+if CONFIG['MOZ_WIDGET_TOOLKIT']:
 
     if CONFIG['MOZ_MEMORY'] and FORCE_SHARED_LIB:
         pass
@@ -98,5 +97,8 @@ if CONFIG['OS_TARGET'] == 'Darwin':
     # because somehow clang doesn't want to accept the __thread keyword
     # for TLS.
     LDFLAGS += ['-Wl,-bind_at_load']
+
+if CONFIG['MOZ_LINKER'] and CONFIG['TARGET_CPU'] == 'arm':
+    LDFLAGS += ['-Wl,-version-script,%s/arm-eabi-filter' % SRCDIR]
 
 DIST_INSTALL = True

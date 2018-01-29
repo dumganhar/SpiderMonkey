@@ -7,7 +7,7 @@ set -e
 
 : ${MKDIR:=mkdir}
 : ${TAR:=tar}
-: ${AUTOCONF:=autoconf213}
+: ${AUTOCONF:=autoconf-2.13}
 : ${SRCDIR:=$(cd $(dirname $0); pwd 2>/dev/null)}
 : ${MOZJS_NAME:=mozjs}
 # The place to gather files to be added to the tarball.
