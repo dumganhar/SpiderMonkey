@@ -144,13 +144,13 @@ ac_add_options --enable-artifact-builds
 # Upgrade Mercurial older than this.
 # This should match OLDEST_NON_LEGACY_VERSION from
 # the hg setup wizard in version-control-tools.
-MODERN_MERCURIAL_VERSION = LooseVersion('3.7.3')
+MODERN_MERCURIAL_VERSION = LooseVersion('4.2.3')
 
 # Upgrade Python older than this.
 MODERN_PYTHON_VERSION = LooseVersion('2.7.3')
 
 # Upgrade rust older than this.
-MODERN_RUST_VERSION = LooseVersion('1.21.0')
+MODERN_RUST_VERSION = LooseVersion('1.24.0')
 
 
 class BaseBootstrapper(object):
@@ -258,14 +258,6 @@ class BaseBootstrapper(object):
         raise NotImplementedError(
             '%s does not yet implement ensure_stylo_packages()'
             % __name__)
-
-    def ensure_proguard_packages(self, state_dir, checkout_root):
-        '''
-        Install any necessary packages that provide the Proguard JAR.
-
-        Only required to build mobile/android.
-        '''
-        self.install_toolchain_artifact(state_dir, checkout_root, 'proguard-jar')
 
     def install_toolchain_artifact(self, state_dir, checkout_root, toolchain_job):
         mach_binary = os.path.join(checkout_root, 'mach')
@@ -447,15 +439,20 @@ class BaseBootstrapper(object):
 
         return LooseVersion(match.group(1))
 
-    def _hgplain_env(self):
+    def _hg_cleanenv(self, load_hgrc=False):
         """ Returns a copy of the current environment updated with the HGPLAIN
-        environment variable.
+        and HGRCPATH environment variables.
 
         HGPLAIN prevents Mercurial from applying locale variations to the output
         making it suitable for use in scripts.
+
+        HGRCPATH controls the loading of hgrc files. Setting it to the empty
+        string forces that no user or system hgrc file is used.
         """
         env = os.environ.copy()
         env[b'HGPLAIN'] = b'1'
+        if not load_hgrc:
+            env[b'HGRCPATH'] = b''
 
         return env
 
@@ -465,7 +462,7 @@ class BaseBootstrapper(object):
             print(NO_MERCURIAL)
             return False, False, None
 
-        our = self._parse_version(hg, 'version', self._hgplain_env())
+        our = self._parse_version(hg, 'version', self._hg_cleanenv())
         if not our:
             return True, False, None
 

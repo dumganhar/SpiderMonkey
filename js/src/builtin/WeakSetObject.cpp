@@ -7,17 +7,16 @@
 #include "builtin/WeakSetObject.h"
 
 #include "jsapi.h"
-#include "jscntxt.h"
-#include "jsiter.h"
 
 #include "builtin/MapObject.h"
 #include "vm/GlobalObject.h"
+#include "vm/Iteration.h"
+#include "vm/JSContext.h"
 #include "vm/SelfHosting.h"
-
-#include "jsobjinlines.h"
 
 #include "builtin/WeakMapObject-inl.h"
 #include "vm/Interpreter-inl.h"
+#include "vm/JSObject-inl.h"
 #include "vm/NativeObject-inl.h"
 
 using namespace js;
@@ -178,7 +177,7 @@ WeakSetObject::create(JSContext* cx, HandleObject proto /* = nullptr */)
 }
 
 bool
-WeakSetObject::isBuiltinAdd(HandleValue add, JSContext* cx)
+WeakSetObject::isBuiltinAdd(HandleValue add)
 {
     return IsNativeFunction(add, WeakSet_add);
 }

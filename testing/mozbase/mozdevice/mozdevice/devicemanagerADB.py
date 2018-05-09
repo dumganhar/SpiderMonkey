@@ -38,6 +38,7 @@ class DeviceManagerADB(DeviceManager):
     _tempDir = None
     _adb_version = None
     _sdk_version = None
+    _noDevicesOutput = "no devices/emulators found"
     connected = False
 
     def __init__(self, host=None, port=5555, retryLimit=5, packageName='fennec',
@@ -278,7 +279,7 @@ class DeviceManagerADB(DeviceManager):
                                retryLimit=retryLimit, timeout=self.short_timeout)
                 if re.search("unzip: exiting", data) or re.search("Operation not permitted", data):
                     raise Exception("unzip failed, or permissions error")
-            except:
+            except Exception:
                 self._logger.warning(traceback.format_exc())
                 self._logger.warning("zip/unzip failure: falling back to normal push")
                 self._useZip = False
@@ -304,7 +305,7 @@ class DeviceManagerADB(DeviceManager):
                                   retryLimit=retryLimit, timeout=timeout):
                     raise DMError("failed to push %s (copy of %s) to %s" %
                                   (newLocal, localDir, remoteDir))
-            except:
+            except BaseException:
                 raise
             finally:
                 mozfile.remove(tempParent)
@@ -423,7 +424,7 @@ class DeviceManagerADB(DeviceManager):
         else:
             args = cmd[i:].strip()
         acmd.append("-n")
-        acmd.append(cmd[0:i] + "/org.mozilla.gecko.BrowserApp")
+        acmd.append(cmd[0:i] + "/.App")
         if args != "":
             acmd.append("--es")
             acmd.append("args")
@@ -445,11 +446,11 @@ class DeviceManagerADB(DeviceManager):
         self._checkCmd(acmd)
         return outputFile
 
-    def killProcess(self, appname, sig=None):
-        if not sig:
+    def killProcess(self, appname, sig=None, native=False):
+        if not native and not sig:
             try:
                 self.shellCheckOutput(["am", "force-stop", appname], timeout=self.short_timeout)
-            except:
+            except Exception:
                 # no problem - will kill it instead
                 self._logger.info("killProcess failed force-stop of %s" % appname)
 
@@ -544,7 +545,7 @@ class DeviceManagerADB(DeviceManager):
             # Raise a DMError when the device is missing, but not when the
             # directory is empty or missing.
             output = ''.join(proc.output)
-            if ("no devices/emulators found" in output or
+            if (self._noDevicesOutput in output or
                 ("pulled" not in output and
                  "does not exist" not in output)):
                 raise DMError("getDirectory() failed to pull %s: %s" %
@@ -588,7 +589,7 @@ class DeviceManagerADB(DeviceManager):
                 try:
                     self.mkDir(root)
                     return root
-                except:
+                except Exception:
                     pass
 
         raise DMError("Unable to set up device root using paths: [%s]"
@@ -643,11 +644,13 @@ class DeviceManagerADB(DeviceManager):
         if directive == "systime" or directive == "all":
             ret["systime"] = self.shellCheckOutput(["date"], timeout=self.short_timeout)
         if directive == "memtotal" or directive == "all":
-            meminfo = {}
-            for line in self.pullFile("/proc/meminfo").splitlines():
-                key, value = line.split(":")
-                meminfo[key] = value.strip()
-            ret["memtotal"] = meminfo["MemTotal"]
+            out = self.shellCheckOutput(["cat", "/proc/meminfo"], timeout=self.short_timeout)
+            out = out.replace('\r\n', '\n').splitlines(True)
+            for line in out:
+                parts = line.split(":")
+                if len(parts) == 2 and parts[0] == "MemTotal":
+                    ret["memtotal"] = parts[1].strip()
+                    break
         if directive == "disk" or directive == "all":
             data = self.shellCheckOutput(
                 ["df", "/data", "/system", "/sdcard"], timeout=self.short_timeout)
@@ -744,6 +747,9 @@ class DeviceManagerADB(DeviceManager):
                 if ret_code != 0:
                     self._logger.error("Non-zero return code (%d) from %s" % (ret_code, finalArgs))
                     self._logger.error("Output: %s" % proc.output)
+                output = ''.join(proc.output)
+                if self._noDevicesOutput in output:
+                    raise DMError(self._noDevicesOutput)
                 return ret_code
 
         raise DMError("Timeout exceeded for _checkCmd call after %d retries." % retries)
@@ -863,7 +869,7 @@ class DeviceManagerADB(DeviceManager):
             proc = ProcessHandler(["zip", "-?"], storeOutput=False, processOutputLine=_noOutput)
             proc.run()
             proc.wait()
-        except:
+        except Exception:
             return False
         return True
 

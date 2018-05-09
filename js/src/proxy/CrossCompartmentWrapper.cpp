@@ -4,16 +4,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "jsiter.h"
-#include "jswrapper.h"
-
+#include "gc/PublicIterators.h"
+#include "js/Wrapper.h"
 #include "proxy/DeadObjectProxy.h"
+#include "vm/Iteration.h"
 #include "vm/WrapperObject.h"
 
-#include "jscompartmentinlines.h"
-#include "jsobjinlines.h"
-
 #include "gc/Nursery-inl.h"
+#include "vm/JSCompartment-inl.h"
+#include "vm/JSObject-inl.h"
 
 using namespace js;
 
@@ -260,8 +259,7 @@ CrossCompartmentWrapper::getOwnEnumerablePropertyKeys(JSContext* cx, HandleObjec
 static bool
 CanReify(HandleObject obj)
 {
-    return obj->is<PropertyIteratorObject>() &&
-           (obj->as<PropertyIteratorObject>().getNativeIterator()->flags & JSITER_ENUMERATE);
+    return obj->is<PropertyIteratorObject>();
 }
 
 struct AutoCloseIterator
@@ -303,11 +301,13 @@ Reify(JSContext* cx, JSCompartment* origin, HandleObject objp)
         if (length > 0) {
             if (!keys.reserve(length))
                 return nullptr;
+            RootedId id(cx);
+            RootedValue v(cx);
             for (size_t i = 0; i < length; ++i) {
-                RootedId id(cx);
-                RootedValue v(cx, StringValue(ni->begin()[i]));
+                v.setString(ni->begin()[i]);
                 if (!ValueToId<CanGC>(cx, v, &id))
                     return nullptr;
+                cx->markId(id);
                 keys.infallibleAppend(id);
             }
         }
@@ -315,7 +315,7 @@ Reify(JSContext* cx, JSCompartment* origin, HandleObject objp)
         close.clear();
         CloseIterator(iterObj);
 
-        obj = EnumeratedIdVectorToIterator(cx, obj, ni->flags, keys);
+        obj = EnumeratedIdVectorToIterator(cx, obj, keys);
     }
     return obj;
 }

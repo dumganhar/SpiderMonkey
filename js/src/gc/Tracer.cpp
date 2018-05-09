@@ -8,23 +8,21 @@
 
 #include "mozilla/DebugOnly.h"
 
-#include "jsapi.h"
-#include "jsfun.h"
-#include "jsprf.h"
-#include "jsscript.h"
 #include "jsutil.h"
 #include "NamespaceImports.h"
 
 #include "gc/GCInternals.h"
 #include "gc/Marking.h"
+#include "gc/PublicIterators.h"
 #include "gc/Zone.h"
-
+#include "util/Text.h"
+#include "vm/JSFunction.h"
+#include "vm/JSScript.h"
 #include "vm/Shape.h"
-#include "vm/Symbol.h"
+#include "vm/SymbolType.h"
 
-#include "jscompartmentinlines.h"
-#include "jsgcinlines.h"
-
+#include "gc/GC-inl.h"
+#include "vm/JSCompartment-inl.h"
 #include "vm/ObjectGroup-inl.h"
 
 using namespace js;
@@ -484,3 +482,10 @@ JS_GetTraceThingInfo(char* buf, size_t bufsize, JSTracer* trc, void* thing,
 JS::CallbackTracer::CallbackTracer(JSContext* cx, WeakMapTraceKind weakTraceKind)
   : CallbackTracer(cx->runtime(), weakTraceKind)
 {}
+
+uint32_t
+JSTracer::gcNumberForMarking() const
+{
+    MOZ_ASSERT(isMarkingTracer());
+    return runtime()->gc.gcNumber();
+}

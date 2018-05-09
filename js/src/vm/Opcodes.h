@@ -698,15 +698,14 @@
     macro(JSOP_THROWMSG,   74, "throwmsg",    NULL,         3,  0,  0, JOF_UINT16) \
     \
     /*
-     * Sets up a for-in or for-each-in loop using the JSITER_* flag bits in
-     * this op's uint8_t immediate operand. It pops the top of stack value as
-     * 'val' and pushes 'iter' which is an iterator for 'val'.
+     * Sets up a for-in loop. It pops the top of stack value as 'val' and pushes
+     * 'iter' which is an iterator for 'val'.
      *   Category: Statements
      *   Type: For-In Statement
-     *   Operands: uint8_t flags
+     *   Operands:
      *   Stack: val => iter
      */ \
-    macro(JSOP_ITER,      75, "iter",       NULL,         2,  1,  1,  JOF_UINT8) \
+    macro(JSOP_ITER,      75, "iter",       NULL,         1,  1,  1,  JOF_BYTE) \
     /*
      * Pushes the next iterated value onto the stack. If no value is available,
      * MagicValue(JS_NO_ITER_VALUE) is pushed.
@@ -2139,14 +2138,15 @@
      */ \
     macro(JSOP_AWAIT,         209, "await",        NULL,  4,  2,  1,  JOF_UINT24) \
     /*
-     * Pops the iterator from the top of the stack, and create async iterator
-     * from it and push the async iterator back onto the stack.
+     * Pops the iterator and its next method from the top of the stack, and
+     * create async iterator from it and push the async iterator back onto the
+     * stack.
      *   Category: Statements
      *   Type: Generator
      *   Operands:
-     *   Stack: iter => asynciter
+     *   Stack: iter, next => asynciter
      */ \
-    macro(JSOP_TOASYNCITER,   210, "toasynciter",  NULL,  1,  1,  1,  JOF_BYTE) \
+    macro(JSOP_TOASYNCITER,   210, "toasynciter",  NULL,  1,  2,  1,  JOF_BYTE) \
     /*
      * Pops the top two values 'id' and 'obj' from the stack, then pushes
      * obj.hasOwnProperty(id)

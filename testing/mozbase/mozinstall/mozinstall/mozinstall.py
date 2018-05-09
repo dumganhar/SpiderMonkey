@@ -103,13 +103,12 @@ def install(src, dest):
     :param dest: Path to install to (to ensure we do not overwrite any existent
                  files the folder should not exist yet)
     """
-
     if not is_installer(src):
         msg = "{} is not a valid installer file".format(src)
         if '://' in src:
             try:
                 return _install_url(src, dest)
-            except:
+            except Exception:
                 exc, val, tb = sys.exc_info()
                 msg = "{} ({})".format(msg, val)
                 reraise(InvalidSource, msg, tb)
@@ -135,18 +134,18 @@ def install(src, dest):
 
         return install_dir
 
-    except:
+    except BaseException:
         cls, exc, trbk = sys.exc_info()
         if did_we_create:
             try:
                 # try to uninstall this properly
                 uninstall(dest)
-            except:
+            except Exception:
                 # uninstall may fail, let's just try to clean the folder
                 # in this case
                 try:
                     mozfile.remove(dest)
-                except:
+                except Exception:
                     pass
         if issubclass(cls, Exception):
             error = InstallError('Failed to install "%s (%s)"' % (src, str(exc)))
@@ -311,7 +310,7 @@ def _install_dmg(src, dest):
 
     finally:
         if appDir:
-            subprocess.call('hdiutil detach %s -quiet' % appDir,
+            subprocess.call('hdiutil detach "%s" -quiet' % appDir,
                             shell=True)
 
     return dest

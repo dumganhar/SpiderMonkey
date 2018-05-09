@@ -12,18 +12,16 @@
 #include "mozilla/Maybe.h"
 
 #include "jsarray.h"
-#include "jscntxt.h"
-#include "jscompartment.h"
 #include "jsdate.h"
 #include "jsfriendapi.h"
-#include "jsfun.h"
-#include "jshashutil.h"
-#include "jsiter.h"
-#include "jsstr.h"
-#include "jswrapper.h"
 #include "selfhosted.out.h"
 
-#include "builtin/Intl.h"
+#include "builtin/intl/Collator.h"
+#include "builtin/intl/DateTimeFormat.h"
+#include "builtin/intl/IntlObject.h"
+#include "builtin/intl/NumberFormat.h"
+#include "builtin/intl/PluralRules.h"
+#include "builtin/intl/RelativeTimeFormat.h"
 #include "builtin/MapObject.h"
 #include "builtin/ModuleObject.h"
 #include "builtin/Object.h"
@@ -33,31 +31,38 @@
 #include "builtin/SelfHostingDefines.h"
 #include "builtin/SIMD.h"
 #include "builtin/Stream.h"
+#include "builtin/String.h"
 #include "builtin/TypedObject.h"
 #include "builtin/WeakMapObject.h"
+#include "gc/HashUtil.h"
 #include "gc/Marking.h"
 #include "gc/Policy.h"
 #include "jit/AtomicOperations.h"
 #include "jit/InlinableNatives.h"
 #include "js/CharacterEncoding.h"
 #include "js/Date.h"
+#include "js/Wrapper.h"
+#include "util/StringBuffer.h"
+#include "vm/ArgumentsObject.h"
 #include "vm/Compression.h"
 #include "vm/GeneratorObject.h"
 #include "vm/Interpreter.h"
+#include "vm/Iteration.h"
+#include "vm/JSCompartment.h"
+#include "vm/JSContext.h"
+#include "vm/JSFunction.h"
 #include "vm/Printer.h"
 #include "vm/RegExpObject.h"
-#include "vm/String.h"
-#include "vm/StringBuffer.h"
+#include "vm/StringType.h"
 #include "vm/TypedArrayObject.h"
 #include "vm/WrapperObject.h"
 
-#include "jsatominlines.h"
-#include "jsfuninlines.h"
-#include "jsobjinlines.h"
-#include "jsscriptinlines.h"
-
-#include "gc/Iteration-inl.h"
+#include "gc/PrivateIterators-inl.h"
 #include "vm/BooleanObject-inl.h"
+#include "vm/JSAtom-inl.h"
+#include "vm/JSFunction-inl.h"
+#include "vm/JSObject-inl.h"
+#include "vm/JSScript-inl.h"
 #include "vm/NativeObject-inl.h"
 #include "vm/NumberObject-inl.h"
 #include "vm/StringObject-inl.h"
@@ -68,7 +73,6 @@ using namespace js::selfhosted;
 using JS::AutoCheckCannotGC;
 using mozilla::IsInRange;
 using mozilla::Maybe;
-using mozilla::PodMove;
 
 static void
 selfHosting_WarningReporter(JSContext* cx, JSErrorReport* report)
@@ -231,8 +235,8 @@ intrinsic_GetBuiltinConstructor(JSContext* cx, unsigned argc, Value* vp)
     RootedId id(cx, AtomToId(atom));
     JSProtoKey key = JS_IdToProtoKey(cx, id);
     MOZ_ASSERT(key != JSProto_Null);
-    RootedObject ctor(cx);
-    if (!GetBuiltinConstructor(cx, key, &ctor))
+    JSObject* ctor = GlobalObject::getOrCreateConstructor(cx, key);
+    if (!ctor)
         return false;
     args.rval().setObject(*ctor);
     return true;
@@ -262,9 +266,11 @@ static bool
 intrinsic_OwnPropertyKeys(JSContext* cx, unsigned argc, Value* vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
+    MOZ_ASSERT(args.length() == 1);
     MOZ_ASSERT(args[0].isObject());
-    MOZ_ASSERT(args[1].isInt32());
-    return GetOwnPropertyKeys(cx, args, args[1].toInt32());
+    RootedObject obj(cx, &args[0].toObject());
+    return GetOwnPropertyKeys(cx, obj, JSITER_OWNONLY | JSITER_HIDDEN | JSITER_SYMBOLS,
+                              args.rval());
 }
 
 static void
@@ -373,6 +379,9 @@ intrinsic_CreateModuleSyntaxError(JSContext* cx, unsigned argc, Value* vp)
 
     RootedModuleObject module(cx, &args[0].toObject().as<ModuleObject>());
     RootedString filename(cx, JS_NewStringCopyZ(cx, module->script()->filename()));
+    if (!filename)
+        return false;
+
     RootedString message(cx, args[3].toString());
 
     RootedValue error(cx);
@@ -1791,6 +1800,7 @@ static bool
 intrinsic_RuntimeDefaultLocale(JSContext* cx, unsigned argc, Value* vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
+    MOZ_ASSERT(args.length() == 0);
 
     const char* locale = cx->runtime()->getDefaultLocale();
     if (!locale) {
@@ -1803,6 +1813,45 @@ intrinsic_RuntimeDefaultLocale(JSContext* cx, unsigned argc, Value* vp)
         return false;
 
     args.rval().setString(jslocale);
+    return true;
+}
+
+static bool
+intrinsic_IsRuntimeDefaultLocale(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+    MOZ_ASSERT(args.length() == 1);
+    MOZ_ASSERT(args[0].isString() || args[0].isUndefined());
+
+    // |undefined| is the default value when the Intl runtime caches haven't
+    // yet been initialized. Handle it the same way as a cache miss.
+    if (args[0].isUndefined()) {
+        args.rval().setBoolean(false);
+        return true;
+    }
+
+    const char* locale = cx->runtime()->getDefaultLocale();
+    if (!locale) {
+        JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_DEFAULT_LOCALE_ERROR);
+        return false;
+    }
+
+    JSLinearString* str = args[0].toString()->ensureLinear(cx);
+    if (!str)
+        return false;
+
+    bool equals;
+    if (str->length() == strlen(locale)) {
+        JS::AutoCheckCannotGC nogc;
+        const Latin1Char* latin1Locale = reinterpret_cast<const Latin1Char*>(locale);
+        equals = str->hasLatin1Chars()
+                 ? EqualChars(str->latin1Chars(nogc), latin1Locale, str->length())
+                 : EqualChars(str->twoByteChars(nogc), latin1Locale, str->length());
+    } else {
+        equals = false;
+    }
+
+    args.rval().setBoolean(equals);
     return true;
 }
 
@@ -1950,8 +1999,8 @@ intrinsic_ConstructorForTypedArray(JSContext* cx, unsigned argc, Value* vp)
     // compartment, and never call the constructor in the ArrayBuffer's
     // compartment from script, we are not guaranteed to have initialized
     // the constructor.
-    RootedObject ctor(cx);
-    if (!GetBuiltinConstructor(cx, protoKey, &ctor))
+    JSObject* ctor = GlobalObject::getOrCreateConstructor(cx, protoKey);
+    if (!ctor)
         return false;
 
     args.rval().setObject(*ctor);
@@ -2003,17 +2052,6 @@ intrinsic_HostResolveImportedModule(JSContext* cx, unsigned argc, Value* vp)
 }
 
 static bool
-intrinsic_CreateModuleEnvironment(JSContext* cx, unsigned argc, Value* vp)
-{
-    CallArgs args = CallArgsFromVp(argc, vp);
-    MOZ_ASSERT(args.length() == 1);
-    RootedModuleObject module(cx, &args[0].toObject().as<ModuleObject>());
-    module->createEnvironment();
-    args.rval().setUndefined();
-    return true;
-}
-
-static bool
 intrinsic_CreateImportBinding(JSContext* cx, unsigned argc, Value* vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
@@ -2041,7 +2079,6 @@ intrinsic_CreateNamespaceBinding(JSContext* cx, unsigned argc, Value* vp)
     // the slot directly.
     RootedShape shape(cx, environment->lookup(cx, name));
     MOZ_ASSERT(shape);
-    MOZ_ASSERT(environment->getSlot(shape->slot()).isMagic(JS_UNINITIALIZED_LEXICAL));
     environment->setSlot(shape->slot(), args[2]);
     args.rval().setUndefined();
     return true;
@@ -2185,8 +2222,8 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_INLINABLE_FN("std_String_charAt",         str_charAt,                   1,0, StringCharAt),
     JS_FN("std_String_endsWith",                 str_endsWith,                 1,0),
     JS_FN("std_String_trim",                     str_trim,                     0,0),
-    JS_FN("std_String_trimLeft",                 str_trimLeft,                 0,0),
-    JS_FN("std_String_trimRight",                str_trimRight,                0,0),
+    JS_FN("std_String_trimStart",                str_trimStart,                0,0),
+    JS_FN("std_String_trimEnd",                  str_trimEnd,                  0,0),
 #if !EXPOSE_INTL_API
     JS_FN("std_String_toLocaleLowerCase",        str_toLocaleLowerCase,        0,0),
     JS_FN("std_String_toLocaleUpperCase",        str_toLocaleUpperCase,        0,0),
@@ -2243,6 +2280,7 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_INLINABLE_FN("_FinishBoundFunctionInit", intrinsic_FinishBoundFunctionInit, 3,0,
                     IntrinsicFinishBoundFunctionInit),
     JS_FN("RuntimeDefaultLocale",    intrinsic_RuntimeDefaultLocale,    0,0),
+    JS_FN("IsRuntimeDefaultLocale",  intrinsic_IsRuntimeDefaultLocale,  1,0),
     JS_FN("AddContentTelemetry",     intrinsic_AddContentTelemetry,     2,0),
     JS_FN("_DefineDataProperty",     intrinsic_DefineDataProperty,      4,0),
     JS_FN("_DefineProperty",         intrinsic_DefineProperty,          6,0),
@@ -2434,7 +2472,7 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_FOR_EACH_REFERENCE_TYPE_REPR(LOAD_AND_STORE_REFERENCE_FN_DECLS)
 #undef LOAD_AND_STORE_REFERENCE_FN_DECLS
 
-    // See builtin/Intl.h for descriptions of the intl_* functions.
+    // See builtin/intl/*.h for descriptions of the intl_* functions.
     JS_FN("intl_availableCalendars", intl_availableCalendars, 1,0),
     JS_FN("intl_availableCollations", intl_availableCollations, 1,0),
     JS_FN("intl_canonicalizeTimeZone", intl_canonicalizeTimeZone, 1,0),
@@ -2446,6 +2484,7 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_FN("intl_defaultCalendar", intl_defaultCalendar, 1,0),
     JS_FN("intl_defaultTimeZone", intl_defaultTimeZone, 0,0),
     JS_FN("intl_defaultTimeZoneOffset", intl_defaultTimeZoneOffset, 0,0),
+    JS_FN("intl_isDefaultTimeZone", intl_isDefaultTimeZone, 1,0),
     JS_FN("intl_FormatDateTime", intl_FormatDateTime, 2,0),
     JS_FN("intl_FormatNumber", intl_FormatNumber, 2,0),
     JS_FN("intl_GetCalendarInfo", intl_GetCalendarInfo, 1,0),
@@ -2459,10 +2498,10 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_FN("intl_patternForSkeleton", intl_patternForSkeleton, 2,0),
     JS_FN("intl_patternForStyle", intl_patternForStyle, 3,0),
     JS_FN("intl_PluralRules_availableLocales", intl_PluralRules_availableLocales, 0,0),
-    JS_FN("intl_GetPluralCategories", intl_GetPluralCategories, 2, 0),
+    JS_FN("intl_GetPluralCategories", intl_GetPluralCategories, 1, 0),
     JS_FN("intl_SelectPluralRule", intl_SelectPluralRule, 2,0),
     JS_FN("intl_RelativeTimeFormat_availableLocales", intl_RelativeTimeFormat_availableLocales, 0,0),
-    JS_FN("intl_FormatRelativeTime", intl_FormatRelativeTime, 3,0),
+    JS_FN("intl_FormatRelativeTime", intl_FormatRelativeTime, 4,0),
     JS_FN("intl_toLocaleLowerCase", intl_toLocaleLowerCase, 2,0),
     JS_FN("intl_toLocaleUpperCase", intl_toLocaleUpperCase, 2,0),
 
@@ -2523,8 +2562,6 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_FN("ThrowArgTypeNotObject", intrinsic_ThrowArgTypeNotObject, 2, 0),
 
     // See builtin/RegExp.h for descriptions of the regexp_* functions.
-    JS_FN("regexp_exec_no_statics", regexp_exec_no_statics, 2,0),
-    JS_FN("regexp_test_no_statics", regexp_test_no_statics, 2,0),
     JS_FN("regexp_construct_raw_flags", regexp_construct_raw_flags, 2,0),
 
     JS_FN("IsModule", intrinsic_IsInstanceOfBuiltin<ModuleObject>, 1, 0),
@@ -2532,7 +2569,6 @@ static const JSFunctionSpec intrinsic_functions[] = {
           CallNonGenericSelfhostedMethod<Is<ModuleObject>>, 2, 0),
     JS_FN("HostResolveImportedModule", intrinsic_HostResolveImportedModule, 2, 0),
     JS_FN("IsModuleEnvironment", intrinsic_IsInstanceOfBuiltin<ModuleEnvironmentObject>, 1, 0),
-    JS_FN("CreateModuleEnvironment", intrinsic_CreateModuleEnvironment, 1, 0),
     JS_FN("CreateImportBinding", intrinsic_CreateImportBinding, 4, 0),
     JS_FN("CreateNamespaceBinding", intrinsic_CreateNamespaceBinding, 3, 0),
     JS_FN("InstantiateModuleFunctionDeclarations",
@@ -2570,7 +2606,6 @@ js::FillSelfHostingCompileOptions(CompileOptions& options)
     options.setFileAndLine("self-hosted", 1);
     options.setSelfHostingMode(true);
     options.setCanLazilyParse(false);
-    options.setVersion(JSVERSION_DEFAULT);
     options.werrorOption = true;
     options.strictOption = true;
 
@@ -2952,8 +2987,7 @@ CloneObject(JSContext* cx, HandleNativeObject selfHostedObject)
         RegExpObject& reobj = selfHostedObject->as<RegExpObject>();
         RootedAtom source(cx, reobj.getSource());
         MOZ_ASSERT(source->isPermanentAtom());
-        clone = RegExpObject::create(cx, source, reobj.getFlags(),
-                                     nullptr, nullptr, cx->tempLifoAlloc(),
+        clone = RegExpObject::create(cx, source, reobj.getFlags(), cx->tempLifoAlloc(),
                                      TenuredObject);
     } else if (selfHostedObject->is<DateObject>()) {
         clone = JS::NewDateObject(cx, selfHostedObject->as<DateObject>().clippedTime());
@@ -3161,3 +3195,9 @@ js::GetSelfHostedFunctionName(JSFunction* fun)
 static_assert(JSString::MAX_LENGTH <= INT32_MAX,
               "StringIteratorNext in builtin/String.js assumes the stored index "
               "into the string is an Int32Value");
+
+static_assert(JSString::MAX_LENGTH == MAX_STRING_LENGTH,
+              "JSString::MAX_LENGTH matches self-hosted constant for maximum string length");
+
+static_assert(ARGS_LENGTH_MAX == MAX_ARGS_LENGTH,
+              "ARGS_LENGTH_MAX matches self-hosted constant for maximum arguments length");

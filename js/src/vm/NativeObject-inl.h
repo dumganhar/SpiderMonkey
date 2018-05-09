@@ -9,19 +9,17 @@
 
 #include "vm/NativeObject.h"
 
-#include "jscntxt.h"
-
 #include "builtin/TypedObject.h"
 #include "gc/GCTrace.h"
 #include "proxy/Proxy.h"
+#include "vm/JSContext.h"
 #include "vm/ProxyObject.h"
 #include "vm/TypedArrayObject.h"
-
-#include "jsobjinlines.h"
 
 #include "gc/Heap-inl.h"
 #include "gc/Marking-inl.h"
 #include "gc/ObjectKind-inl.h"
+#include "vm/JSObject-inl.h"
 
 namespace js {
 
@@ -125,7 +123,7 @@ NativeObject::elementsRangeWriteBarrierPost(uint32_t start, uint32_t count)
 {
     for (size_t i = 0; i < count; i++) {
         const Value& v = elements_[start + i];
-        if (v.isObject() && IsInsideNursery(&v.toObject())) {
+        if ((v.isObject() || v.isString()) && IsInsideNursery(v.toGCThing())) {
             zone()->group()->storeBuffer().putSlot(this, HeapSlot::Element,
                                                    unshiftedIndex(start + i),
                                                    count - i);
@@ -260,8 +258,7 @@ NativeObject::moveDenseElements(uint32_t dstStart, uint32_t srcStart, uint32_t c
                 dst->set(this, HeapSlot::Element, dst - elements_ + numShifted, *src);
         }
     } else {
-        memmove(reinterpret_cast<Value*>(elements_ + dstStart), elements_ + srcStart,
-                count * sizeof(Value));
+        memmove(elements_ + dstStart, elements_ + srcStart, count * sizeof(HeapSlot));
         elementsRangeWriteBarrierPost(dstStart, count);
     }
 }
@@ -276,14 +273,38 @@ NativeObject::moveDenseElementsNoPreBarrier(uint32_t dstStart, uint32_t srcStart
     MOZ_ASSERT(!denseElementsAreCopyOnWrite());
     MOZ_ASSERT(!denseElementsAreFrozen());
 
-    memmove(reinterpret_cast<Value*>(elements_ + dstStart), elements_ + srcStart,
-            count * sizeof(Value));
+    memmove(elements_ + dstStart, elements_ + srcStart, count * sizeof(HeapSlot));
     elementsRangeWriteBarrierPost(dstStart, count);
 }
 
 inline void
-NativeObject::ensureDenseInitializedLengthNoPackedCheck(JSContext* cx, uint32_t index,
-                                                        uint32_t extra)
+NativeObject::reverseDenseElementsNoPreBarrier(uint32_t length)
+{
+    MOZ_ASSERT(!shadowZone()->needsIncrementalBarrier());
+
+    MOZ_ASSERT(!denseElementsAreCopyOnWrite());
+    MOZ_ASSERT(!denseElementsAreFrozen());
+
+    MOZ_ASSERT(length > 1);
+    MOZ_ASSERT(length <= getDenseInitializedLength());
+
+    Value* valLo = reinterpret_cast<Value*>(elements_);
+    Value* valHi = valLo + (length - 1);
+    MOZ_ASSERT(valLo < valHi);
+
+    do {
+        Value origLo = *valLo;
+        *valLo = *valHi;
+        *valHi = origLo;
+        ++valLo;
+        --valHi;
+    } while (valLo < valHi);
+
+    elementsRangeWriteBarrierPost(0, length);
+}
+
+inline void
+NativeObject::ensureDenseInitializedLengthNoPackedCheck(uint32_t index, uint32_t extra)
 {
     MOZ_ASSERT(!denseElementsAreCopyOnWrite());
     MOZ_ASSERT(!denseElementsAreFrozen());
@@ -314,7 +335,7 @@ NativeObject::ensureDenseInitializedLength(JSContext* cx, uint32_t index, uint32
 {
     if (writeToIndexWouldMarkNotPacked(index))
         markDenseElementsNotPacked(cx);
-    ensureDenseInitializedLengthNoPackedCheck(cx, index, extra);
+    ensureDenseInitializedLengthNoPackedCheck(index, extra);
 }
 
 DenseElementResult
@@ -374,7 +395,7 @@ NativeObject::ensureDenseElements(JSContext* cx, uint32_t index, uint32_t extra)
     if (extra == 1) {
         /* Optimize for the common case. */
         if (index < currentCapacity) {
-            ensureDenseInitializedLengthNoPackedCheck(cx, index, 1);
+            ensureDenseInitializedLengthNoPackedCheck(index, 1);
             return DenseElementResult::Success;
         }
         requiredCapacity = index + 1;
@@ -389,7 +410,7 @@ NativeObject::ensureDenseElements(JSContext* cx, uint32_t index, uint32_t extra)
             return DenseElementResult::Incomplete;
         }
         if (requiredCapacity <= currentCapacity) {
-            ensureDenseInitializedLengthNoPackedCheck(cx, index, extra);
+            ensureDenseInitializedLengthNoPackedCheck(index, extra);
             return DenseElementResult::Success;
         }
     }
@@ -398,7 +419,7 @@ NativeObject::ensureDenseElements(JSContext* cx, uint32_t index, uint32_t extra)
     if (result != DenseElementResult::Success)
         return result;
 
-    ensureDenseInitializedLengthNoPackedCheck(cx, index, extra);
+    ensureDenseInitializedLengthNoPackedCheck(index, extra);
     return DenseElementResult::Success;
 }
 
@@ -490,9 +511,9 @@ NativeObject::setSlotWithType(JSContext* cx, Shape* shape,
 inline void
 NativeObject::updateShapeAfterMovingGC()
 {
-    Shape* shape = shape_;
+    Shape* shape = this->shape();
     if (IsForwarded(shape))
-        shape_.unsafeSet(Forwarded(shape));
+        shapeRef().unsafeSet(Forwarded(shape));
 }
 
 inline bool
@@ -519,14 +540,15 @@ NativeObject::create(JSContext* cx, js::gc::AllocKind kind, js::gc::InitialHeap 
         return cx->alreadyReportedOOM();
 
     NativeObject* nobj = static_cast<NativeObject*>(obj);
-    nobj->group_.init(group);
+    nobj->initGroup(group);
     nobj->initShape(shape);
-
-    // Note: slots are created and assigned internally by Allocate<JSObject>.
-    nobj->setInitialElementsMaybeNonNative(js::emptyObjectElements);
+    // NOTE: Dynamic slots are created internally by Allocate<JSObject>.
+    if (!nDynamicSlots)
+        nobj->initSlots(nullptr);
+    nobj->setEmptyElements();
 
     if (clasp->hasPrivate())
-        nobj->privateRef(shape->numFixedSlots()) = nullptr;
+        nobj->initPrivate(nullptr);
 
     if (size_t span = shape->slotSpan())
         nobj->initializeSlotRange(0, span);
@@ -640,14 +662,14 @@ NativeObject::setLastProperty(JSContext* cx, Shape* shape)
     size_t newSpan = shape->slotSpan();
 
     if (oldSpan == newSpan) {
-        shape_ = shape;
+        setShape(shape);
         return true;
     }
 
     if (MOZ_UNLIKELY(!updateSlotsForSpan(cx, oldSpan, newSpan)))
         return false;
 
-    shape_ = shape;
+    setShape(shape);
     return true;
 }
 

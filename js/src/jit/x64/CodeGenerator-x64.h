@@ -21,7 +21,6 @@ class CodeGeneratorX64 : public CodeGeneratorX86Shared
   protected:
     Operand ToOperand64(const LInt64Allocation& a);
     ValueOperand ToValue(LInstruction* ins, size_t pos);
-    ValueOperand ToOutValue(LInstruction* ins);
     ValueOperand ToTempValue(LInstruction* ins, size_t pos);
 
     void storeUnboxedValue(const LAllocation* value, MIRType valueType,
@@ -56,8 +55,6 @@ class CodeGeneratorX64 : public CodeGeneratorX86Shared
     void visitSignExtendInt64(LSignExtendInt64* ins);
     void visitWasmTruncateToInt64(LWasmTruncateToInt64* lir);
     void visitInt64ToFloatingPoint(LInt64ToFloatingPoint* lir);
-    void visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins);
-    void visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins);
     void visitWasmLoad(LWasmLoad* ins);
     void visitWasmLoadI64(LWasmLoadI64* ins);
     void visitWasmStore(LWasmStore* ins);
@@ -65,10 +62,10 @@ class CodeGeneratorX64 : public CodeGeneratorX86Shared
     void visitWasmSelectI64(LWasmSelectI64* ins);
     void visitAsmJSLoadHeap(LAsmJSLoadHeap* ins);
     void visitAsmJSStoreHeap(LAsmJSStoreHeap* ins);
-    void visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins);
-    void visitAsmJSAtomicExchangeHeap(LAsmJSAtomicExchangeHeap* ins);
-    void visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins);
-    void visitAsmJSAtomicBinopHeapForEffect(LAsmJSAtomicBinopHeapForEffect* ins);
+    void visitWasmCompareExchangeHeap(LWasmCompareExchangeHeap* ins);
+    void visitWasmAtomicExchangeHeap(LWasmAtomicExchangeHeap* ins);
+    void visitWasmAtomicBinopHeap(LWasmAtomicBinopHeap* ins);
+    void visitWasmAtomicBinopHeapForEffect(LWasmAtomicBinopHeapForEffect* ins);
     void visitWasmUint32ToDouble(LWasmUint32ToDouble* lir);
     void visitWasmUint32ToFloat32(LWasmUint32ToFloat32* lir);
     void visitWasmReinterpretFromI64(LWasmReinterpretFromI64* lir);

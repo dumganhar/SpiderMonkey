@@ -7,8 +7,8 @@
 #include "js/Proxy.h"
 #include "vm/ProxyObject.h"
 
-#include "jscntxtinlines.h"
-#include "jsobjinlines.h"
+#include "vm/JSContext-inl.h"
+#include "vm/JSObject-inl.h"
 
 using namespace js;
 
@@ -284,7 +284,7 @@ BaseProxyHandler::enumerate(JSContext* cx, HandleObject proxy) const
     if (!GetPropertyKeys(cx, proxy, 0, &props))
         return nullptr;
 
-    return EnumeratedIdVectorToIterator(cx, proxy, 0, props);
+    return EnumeratedIdVectorToIterator(cx, proxy, props);
 }
 
 bool

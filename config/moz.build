@@ -7,14 +7,15 @@
 with Files('**'):
     BUG_COMPONENT = ('Core', 'Build Config')
 
+with Files('mozunit.py'):
+    BUG_COMPONENT = ('Testing', 'Python Test')
+
 DIST_INSTALL = False
 # For sanity's sake, we compile nsinstall without the wrapped system
 # headers, so that we can use it to set up the wrapped system headers.
 NoVisibilityFlags()
 
 CONFIGURE_SUBST_FILES += [
-    'doxygen.cfg',
-    'makefiles/test/Makefile',
     'tests/src-simple/Makefile',
 ]
 
@@ -23,10 +24,7 @@ if CONFIG['HOST_OS_ARCH'] != 'WINNT':
         'nsinstall.c',
         'pathsub.c',
     ]
-    # stdc++compat depends on config/export, so avoid a circular
-    # dependency added by HostProgram depending on stdc++compat,
-    # while the program here is in C.
-    HostProgram('nsinstall_real', c_only=True)
+    HostProgram('nsinstall_real')
 
 if CONFIG['MOZ_SYSTEM_ICU']:
     DEFINES['MOZ_SYSTEM_ICU'] = True
@@ -35,7 +33,7 @@ PYTHON_UNITTEST_MANIFESTS += [
     'tests/python.ini',
 ]
 
-if CONFIG['GNU_CC'] and CONFIG['MOZ_OPTIMIZE']:
+if CONFIG['CC_TYPE'] in ('clang', 'gcc') and CONFIG['MOZ_OPTIMIZE']:
     CFLAGS += ['-O3']
 
 HOST_DEFINES = {
@@ -46,9 +44,9 @@ HOST_DEFINES = {
 include('stl-headers.mozbuild')
 if CONFIG['WRAP_STL_INCLUDES']:
     stl_compiler = None
-    if CONFIG['GNU_CXX']:
+    if CONFIG['CC_TYPE'] in ('clang', 'gcc'):
         stl_compiler = 'gcc'
-    elif CONFIG['_MSC_VER']:
+    elif CONFIG['CC_TYPE'] in ('msvc', 'clang-cl'):
         stl_compiler = 'msvc'
 
     if stl_compiler:

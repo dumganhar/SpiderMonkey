@@ -47,7 +47,7 @@ CodeGeneratorShared::CodeGeneratorShared(MIRGenerator* gen, LIRGraph* graph, Mac
     current(nullptr),
     snapshots_(),
     recovers_(),
-    deoptTable_(nullptr),
+    deoptTable_(),
 #ifdef DEBUG
     pushedArgs_(0),
 #endif
@@ -452,13 +452,15 @@ CodeGeneratorShared::encodeAllocation(LSnapshot* snapshot, MDefinition* mir,
         JSValueType valueType =
             (type == MIRType::ObjectOrNull) ? JSVAL_TYPE_OBJECT : ValueTypeFromMIRType(type);
 
-        MOZ_ASSERT(payload->isMemory() || payload->isRegister());
+        MOZ_DIAGNOSTIC_ASSERT(payload->isMemory() || payload->isRegister());
         if (payload->isMemory())
             alloc = RValueAllocation::Typed(valueType, ToStackIndex(payload));
         else if (payload->isGeneralReg())
             alloc = RValueAllocation::Typed(valueType, ToRegister(payload));
         else if (payload->isFloatReg())
             alloc = RValueAllocation::Double(ToFloatRegister(payload));
+        else
+            MOZ_CRASH("Unexpected payload type.");
         break;
       }
       case MIRType::Float32:
@@ -541,6 +543,7 @@ CodeGeneratorShared::encodeAllocation(LSnapshot* snapshot, MDefinition* mir,
         break;
       }
     }
+    MOZ_DIAGNOSTIC_ASSERT(alloc.valid());
 
     // This set an extra bit as part of the RValueAllocation, such that we know
     // that recover instruction have to be executed without wrapping the
@@ -1366,11 +1369,7 @@ CodeGeneratorShared::callVM(const VMFunction& fun, LInstruction* ins, const Regi
 #endif
 
     // Get the wrapper of the VM function.
-    JitCode* wrapper = gen->jitRuntime()->getVMWrapper(fun);
-    if (!wrapper) {
-        masm.setOOM();
-        return;
-    }
+    TrampolinePtr wrapper = gen->jitRuntime()->getVMWrapper(fun);
 
 #ifdef CHECK_OSIPOINT_REGISTERS
     if (shouldVerifyOsiPointRegs(ins->safepoint()))
@@ -1421,7 +1420,7 @@ class OutOfLineTruncateSlow : public OutOfLineCodeBase<CodeGeneratorShared>
         bytecodeOffset_(bytecodeOffset)
     { }
 
-    void accept(CodeGeneratorShared* codegen) {
+    void accept(CodeGeneratorShared* codegen) override {
         codegen->visitOutOfLineTruncateSlow(this);
     }
     FloatRegister src() const {
@@ -1492,14 +1491,12 @@ CodeGeneratorShared::omitOverRecursedCheck() const
     // stack overflow check. Note that the actual number here is somewhat
     // arbitrary, and codegen actually uses small bounded amounts of
     // additional stack space in some cases too.
-    return frameSize() < 64 && !gen->needsOverrecursedCheck();
+    return frameSize() < MAX_UNCHECKED_LEAF_FRAME_SIZE && !gen->needsOverrecursedCheck();
 }
 
 void
-CodeGeneratorShared::emitWasmCallBase(LWasmCallBase* ins)
+CodeGeneratorShared::emitWasmCallBase(MWasmCall* mir, bool needsBoundsCheck)
 {
-    MWasmCall* mir = ins->mir();
-
     if (mir->spIncrement())
         masm.freeStack(mir->spIncrement());
 
@@ -1532,7 +1529,7 @@ CodeGeneratorShared::emitWasmCallBase(LWasmCallBase* ins)
         break;
       case wasm::CalleeDesc::AsmJSTable:
       case wasm::CalleeDesc::WasmTable:
-        masm.wasmCallIndirect(desc, callee, ins->needsBoundsCheck());
+        masm.wasmCallIndirect(desc, callee, needsBoundsCheck);
         reloadRegs = callee.which() == wasm::CalleeDesc::WasmTable && callee.wasmTableIsExternal();
         break;
       case wasm::CalleeDesc::Builtin:

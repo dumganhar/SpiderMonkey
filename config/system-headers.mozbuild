@@ -1050,11 +1050,11 @@ system_headers = [
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'android':
     system_headers += [
+        'android/api-level.h',
         'android/ashmem.h',
         'android_audio/AudioSystem.h',
         'android/log.h',
         'android/looper.h',
-        'android/native_window.h',
         'android/native_window.h',
         'android/native_window_jni.h',
         'audio_effects/effect_aec.h',

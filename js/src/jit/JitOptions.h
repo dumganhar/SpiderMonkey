@@ -73,8 +73,8 @@ struct DefaultJitOptions
     bool limitScriptSize;
     bool osr;
     bool asmJSAtomicsEnable;
-    bool wasmTestMode;
     bool wasmFoldOffsets;
+    bool wasmDelayTier2;
     bool ionInterruptWithoutSignals;
     bool simulatorAlwaysInterrupt;
     uint32_t baselineWarmUpThreshold;
@@ -94,6 +94,16 @@ struct DefaultJitOptions
     mozilla::Maybe<uint32_t> forcedDefaultIonWarmUpThreshold;
     mozilla::Maybe<uint32_t> forcedDefaultIonSmallFunctionWarmUpThreshold;
     mozilla::Maybe<IonRegisterAllocator> forcedRegisterAllocator;
+
+    // Spectre mitigation flags. Each mitigation has its own flag in order to
+    // measure the effectiveness of each mitigation with various proof of
+    // concept.
+    bool spectreIndexMasking;
+    bool spectreObjectMitigationsBarriers;
+    bool spectreObjectMitigationsMisc;
+    bool spectreStringMitigations;
+    bool spectreValueMasking;
+    bool spectreJitToCxxCalls;
 
     // The options below affect the rest of the VM, and not just the JIT.
     bool disableUnboxedObjects;

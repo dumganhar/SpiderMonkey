@@ -57,7 +57,7 @@ ObjectClassToString(JSContext* cx, HandleObject obj);
 
 // Exposed so SelfHosting.cpp can use it in the OwnPropertyKeys intrinsic
 MOZ_MUST_USE bool
-GetOwnPropertyKeys(JSContext* cx, const JS::CallArgs& args, unsigned flags);
+GetOwnPropertyKeys(JSContext* cx, HandleObject obj, unsigned flags, JS::MutableHandleValue rval);
 
 // Exposed for SelfHosting.cpp
 MOZ_MUST_USE bool
@@ -71,11 +71,9 @@ GetOwnPropertyDescriptorToArray(JSContext* cx, unsigned argc, JS::Value* vp);
 MOZ_MUST_USE bool
 IdToStringOrSymbol(JSContext* cx, JS::HandleId id, JS::MutableHandleValue result);
 
-#if JS_HAS_TOSOURCE
 // Object.prototype.toSource. Function.prototype.toSource and uneval use this.
 JSString*
 ObjectToSource(JSContext* cx, JS::HandleObject obj);
-#endif // JS_HAS_TOSOURCE
 
 extern MOZ_MUST_USE bool
 WatchHandler(JSContext* cx, JSObject* obj, jsid id, const JS::Value& old,

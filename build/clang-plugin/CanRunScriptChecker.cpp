@@ -29,7 +29,7 @@ void CanRunScriptChecker::registerMatchers(MatchFinder *AstMatcher) {
       // This makes this matcher optional.
       anything());
 
-  // Please not that the hasCanRunScriptAnnotation() matchers are not present
+  // Please note that the hasCanRunScriptAnnotation() matchers are not present
   // directly in the cxxMemberCallExpr, callExpr and constructExpr matchers
   // because we check that the corresponding functions can run script later in
   // the checker code.
@@ -93,8 +93,14 @@ private:
 };
 
 void FuncSetCallback::run(const MatchFinder::MatchResult &Result) {
-  const FunctionDecl *Func =
-      Result.Nodes.getNodeAs<FunctionDecl>("canRunScriptFunction");
+  const FunctionDecl *Func;
+  if (auto *Lambda = Result.Nodes.getNodeAs<LambdaExpr>("lambda")) {
+    Func = Lambda->getCallOperator();
+    if (!Func || !hasCustomAnnotation(Func, "moz_can_run_script"))
+      return;
+  } else {
+    Func = Result.Nodes.getNodeAs<FunctionDecl>("canRunScriptFunction");
+  }
 
   CanRunScriptFuncs.insert(Func);
 
@@ -132,7 +138,9 @@ void CanRunScriptChecker::buildFuncSet(ASTContext *Context) {
   Finder.addMatcher(
       functionDecl(hasCanRunScriptAnnotation()).bind("canRunScriptFunction"),
       &Callback);
-
+  Finder.addMatcher(
+      lambdaExpr().bind("lambda"),
+      &Callback);
   // We start the analysis, given the ASTContext our main checker is in.
   Finder.matchAST(*Context);
 }
@@ -181,7 +189,15 @@ void CanRunScriptChecker::check(const MatchFinder::MatchResult &Result) {
       Result.Nodes.getNodeAs<FunctionDecl>("nonCanRunScriptParentFunction");
   // If the parent function can run script, consider that we didn't find a match
   // because we only care about parent functions which can't run script.
-  if (ParentFunction && CanRunScriptFuncs.count(ParentFunction)) {
+  //
+  // In addition, If the parent function is annotated as a
+  // CAN_RUN_SCRIPT_BOUNDARY, we don't want to complain about it calling a
+  // CAN_RUN_SCRIPT function. This is a mechanism to opt out of the infectious
+  // nature of CAN_RUN_SCRIPT which is necessary in some tricky code like
+  // Bindings.
+  if (ParentFunction &&
+      (CanRunScriptFuncs.count(ParentFunction) ||
+       hasCustomAnnotation(ParentFunction, "moz_can_run_script_boundary"))) {
     ParentFunction = nullptr;
   }
 
@@ -206,6 +222,9 @@ void CanRunScriptChecker::check(const MatchFinder::MatchResult &Result) {
   // If the parent function is not marked as MOZ_CAN_RUN_SCRIPT, we emit an
   // error and a not indicating it.
   if (ParentFunction) {
+    assert(!hasCustomAnnotation(ParentFunction, "moz_can_run_script") &&
+           "Matcher missed something");
+
     diag(CallRange.getBegin(), ErrorNonCanRunScriptParent, DiagnosticIDs::Error)
         << CallRange;
 

@@ -21,12 +21,12 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/Unused.h"
 
-#include "jsprf.h"
-
 #include "jit/ProcessExecutableMemory.h"
+#include "util/Text.h"
 #include "wasm/WasmBaselineCompile.h"
 #include "wasm/WasmBinaryIterator.h"
 #include "wasm/WasmGenerator.h"
+#include "wasm/WasmIonCompile.h"
 #include "wasm/WasmSignalHandlers.h"
 #include "wasm/WasmValidate.h"
 
@@ -89,7 +89,8 @@ CompileArgs::initFromContext(JSContext* cx, ScriptedCaller&& scriptedCaller)
 {
     baselineEnabled = cx->options().wasmBaseline();
     ionEnabled = cx->options().wasmIon();
-    testTiering = cx->options().testWasmAwaitTier2();
+    sharedMemoryEnabled = cx->compartment()->creationOptions().getSharedMemoryAndAtomicsEnabled();
+    testTiering = cx->options().testWasmAwaitTier2() || JitOptions.wasmDelayTier2;
 
     // Debug information such as source view or debug traps will require
     // additional memory and permanently stay in baseline code, so we try to
@@ -315,9 +316,6 @@ static const double spaceCutoffPct = 0.9;
 static bool
 TieringBeneficial(uint32_t codeSize)
 {
-    if (!CanUseExtraThreads())
-        return false;
-
     uint32_t cpuCount = HelperThreadState().cpuCount;
     MOZ_ASSERT(cpuCount > 0);
 
@@ -393,11 +391,15 @@ InitialCompileFlags(const CompileArgs& args, Decoder& d, CompileMode* mode, Tier
     if (StartsCodeSection(d.begin(), d.end(), &range))
         codeSectionSize = range.size;
 
+    // Attempt to default to ion if baseline is disabled.
     bool baselineEnabled = BaselineCanCompile() && (args.baselineEnabled || args.testTiering);
     bool debugEnabled = BaselineCanCompile() && args.debugEnabled;
-    bool ionEnabled = args.ionEnabled || !baselineEnabled || args.testTiering;
+    bool ionEnabled = IonCanCompile() && (args.ionEnabled || !baselineEnabled || args.testTiering);
 
-    if (baselineEnabled && ionEnabled && !debugEnabled &&
+    // HasCompilerSupport() should prevent failure here
+    MOZ_RELEASE_ASSERT(baselineEnabled || ionEnabled);
+
+    if (baselineEnabled && ionEnabled && !debugEnabled && CanUseExtraThreads() &&
         (TieringBeneficial(codeSectionSize) || args.testTiering))
     {
         *mode = CompileMode::Tier1;
@@ -422,7 +424,8 @@ wasm::CompileBuffer(const CompileArgs& args, const ShareableBytes& bytecode, Uni
     DebugEnabled debug;
     InitialCompileFlags(args, d, &mode, &tier, &debug);
 
-    ModuleEnvironment env(mode, tier, debug);
+    ModuleEnvironment env(mode, tier, debug,
+                          args.sharedMemoryEnabled ? Shareable::True : Shareable::False);
     if (!DecodeModuleEnvironment(d, &env))
         return nullptr;
 
@@ -447,7 +450,8 @@ wasm::CompileTier2(const CompileArgs& args, Module& module, Atomic<bool>* cancel
     UniqueChars error;
     Decoder d(module.bytecode().bytes, 0, &error);
 
-    ModuleEnvironment env(CompileMode::Tier2, Tier::Ion, DebugEnabled::False);
+    ModuleEnvironment env(CompileMode::Tier2, Tier::Ion, DebugEnabled::False,
+                          args.sharedMemoryEnabled ? Shareable::True : Shareable::False);
     if (!DecodeModuleEnvironment(d, &env))
         return false;
 
@@ -568,7 +572,8 @@ wasm::CompileStreaming(const CompileArgs& args,
         DebugEnabled debug;
         InitialCompileFlags(args, d, &mode, &tier, &debug);
 
-        env.emplace(mode, tier, debug);
+        env.emplace(mode, tier, debug,
+                    args.sharedMemoryEnabled ? Shareable::True : Shareable::False);
         if (!DecodeModuleEnvironment(d, env.ptr()))
             return nullptr;
 

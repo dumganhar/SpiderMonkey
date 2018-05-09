@@ -9,7 +9,7 @@
 #ifndef vm_CommonPropertyNames_h
 #define vm_CommonPropertyNames_h
 
-#include "jsprototypes.h"
+#include "js/ProtoKey.h"
 
 #define FOR_EACH_COMMON_PROPERTYNAME(macro) \
     macro(add, add, "add") \
@@ -29,7 +29,6 @@
     macro(ArrayToLocaleString, ArrayToLocaleString, "ArrayToLocaleString") \
     macro(ArrayType, ArrayType, "ArrayType") \
     macro(ArrayValues, ArrayValues, "ArrayValues") \
-    macro(ArrayValuesAt, ArrayValuesAt, "ArrayValuesAt") \
     macro(as, as, "as") \
     macro(Async, Async, "Async") \
     macro(AsyncFromSyncIterator, AsyncFromSyncIterator, "Async-from-Sync Iterator") \
@@ -163,6 +162,7 @@
     macro(getOwnPropertyNames, getOwnPropertyNames, "getOwnPropertyNames") \
     macro(getPrefix, getPrefix, "get ") \
     macro(getPropertyDescriptor, getPropertyDescriptor, "getPropertyDescriptor") \
+    macro(getPropertySuper, getPropertySuper, "getPropertySuper") \
     macro(getPrototypeOf, getPrototypeOf, "getPrototypeOf") \
     macro(global, global, "global") \
     macro(group, group, "group") \
@@ -375,7 +375,6 @@
     macro(SpeciesConstructor, SpeciesConstructor, "SpeciesConstructor") \
     macro(stack, stack, "stack") \
     macro(star, star, "*") \
-    macro(starDefaultStar, starDefaultStar, "*default*") \
     macro(start, start, "start") \
     macro(startTimestamp, startTimestamp, "startTimestamp") \
     macro(state, state, "state") \
@@ -397,6 +396,10 @@
     macro(timestamp, timestamp, "timestamp") \
     macro(timeZone, timeZone, "timeZone") \
     macro(timeZoneName, timeZoneName, "timeZoneName") \
+    macro(trimEnd, trimEnd, "trimEnd") \
+    macro(trimLeft, trimLeft, "trimLeft") \
+    macro(trimRight, trimRight, "trimRight") \
+    macro(trimStart, trimStart, "trimStart") \
     macro(toGMTString, toGMTString, "toGMTString") \
     macro(toISOString, toISOString, "toISOString") \
     macro(toJSON, toJSON, "toJSON") \

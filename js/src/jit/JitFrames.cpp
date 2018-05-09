@@ -6,9 +6,6 @@
 
 #include "jit/JitFrames-inl.h"
 
-#include "jsfun.h"
-#include "jsobj.h"
-#include "jsscript.h"
 #include "jsutil.h"
 
 #include "gc/Marking.h"
@@ -30,14 +27,17 @@
 #include "vm/Debugger.h"
 #include "vm/GeckoProfiler.h"
 #include "vm/Interpreter.h"
+#include "vm/JSFunction.h"
+#include "vm/JSObject.h"
+#include "vm/JSScript.h"
 #include "vm/TraceLogging.h"
 #include "vm/TypeInference.h"
 #include "wasm/WasmBuiltins.h"
 
-#include "jsscriptinlines.h"
 #include "gc/Nursery-inl.h"
 #include "jit/JSJitFrameIter-inl.h"
 #include "vm/Debugger-inl.h"
+#include "vm/JSScript-inl.h"
 #include "vm/Probes-inl.h"
 #include "vm/TypeInference-inl.h"
 
@@ -143,7 +143,7 @@ CloseLiveIteratorIon(JSContext* cx, const InlineFrameIterator& frame, JSTryNote*
         else
             IteratorCloseForException(cx, iterObject);
     } else {
-        UnwindIteratorForUncatchableException(cx, iterObject);
+        UnwindIteratorForUncatchableException(iterObject);
     }
 }
 
@@ -369,7 +369,7 @@ CloseLiveIteratorsBaselineForUncatchableException(JSContext* cx, const JSJitFram
             BaselineFrameAndStackPointersFromTryNote(tn, frame, &framePointer, &stackPointer);
             Value iterValue(*(Value*) stackPointer);
             RootedObject iterObject(cx, &iterValue.toObject());
-            UnwindIteratorForUncatchableException(cx, iterObject);
+            UnwindIteratorForUncatchableException(iterObject);
         }
     }
 }
@@ -591,10 +591,7 @@ struct AutoResetLastProfilerFrameOnReturnFromException
 void
 HandleExceptionWasm(JSContext* cx, wasm::WasmFrameIter* iter, ResumeFromException* rfe)
 {
-    // Maintain the wasm invariant that we have wasm frames when unwinding.
-    JitActivation* act = cx->activation()->asJit();
-    act->setWasmExitFP((const wasm::Frame*) act->jsExitFP());
-
+    MOZ_ASSERT(cx->activation()->asJit()->hasWasmExitFP());
     rfe->kind = ResumeFromException::RESUME_WASM;
     rfe->framePointer = (uint8_t*) wasm::FailFP;
     rfe->stackPointer = (uint8_t*) wasm::HandleThrow(cx, *iter);
@@ -736,18 +733,7 @@ HandleException(ResumeFromException* rfe)
                 return;
         }
 
-        JitFrameLayout* current = frame.isScripted() ? frame.jsFrame() : nullptr;
-
         ++iter;
-
-        if (current) {
-            // Unwind the frame by updating packedExitFP. This is necessary so
-            // that (1) debugger exception unwind and leave frame hooks don't
-            // see this frame when they use ScriptFrameIter, and (2)
-            // ScriptFrameIter does not crash when accessing an IonScript
-            // that's destroyed by the ionScript->decref call.
-            EnsureBareExitFrame(cx, current);
-        }
 
         if (overrecursed) {
             // We hit an overrecursion error during bailout. Report it now.
@@ -763,11 +749,11 @@ HandleException(ResumeFromException* rfe)
 // Turns a JitFrameLayout into an ExitFrameLayout. Note that it has to be a
 // bare exit frame so it's ignored by TraceJitExitFrame.
 void
-EnsureBareExitFrame(JSContext* cx, JitFrameLayout* frame)
+EnsureBareExitFrame(JitActivation* act, JitFrameLayout* frame)
 {
     ExitFrameLayout* exitFrame = reinterpret_cast<ExitFrameLayout*>(frame);
 
-    if (cx->activation()->asJit()->jsExitFP() == (uint8_t*)frame) {
+    if (act->jsExitFP() == (uint8_t*)frame) {
         // If we already called this function for the current frame, do
         // nothing.
         MOZ_ASSERT(exitFrame->isBareExit());
@@ -775,18 +761,18 @@ EnsureBareExitFrame(JSContext* cx, JitFrameLayout* frame)
     }
 
 #ifdef DEBUG
-    JSJitFrameIter iter(cx);
+    JSJitFrameIter iter(act);
     while (!iter.isScripted())
         ++iter;
     MOZ_ASSERT(iter.current() == frame, "|frame| must be the top JS frame");
 
-    MOZ_ASSERT(!!cx->activation()->asJit()->jsExitFP());
-    MOZ_ASSERT((uint8_t*)exitFrame->footer() >= cx->activation()->asJit()->jsExitFP(),
+    MOZ_ASSERT(!!act->jsExitFP());
+    MOZ_ASSERT((uint8_t*)exitFrame->footer() >= act->jsExitFP(),
                "Must have space for ExitFooterFrame before jsExitFP");
 #endif
 
-    cx->activation()->asJit()->setJSExitFP((uint8_t*)frame);
-    *exitFrame->footer()->addressOfJitCode() = ExitFrameLayout::BareToken();
+    act->setJSExitFP((uint8_t*)frame);
+    exitFrame->footer()->setBareExitFrame();
     MOZ_ASSERT(exitFrame->isBareExit());
 }
 
@@ -833,17 +819,14 @@ ReadAllocation(const JSJitFrameIter& frame, const LAllocation* a)
 #endif
 
 static void
-TraceThisAndArguments(JSTracer* trc, const JSJitFrameIter& frame)
+TraceThisAndArguments(JSTracer* trc, const JSJitFrameIter& frame, JitFrameLayout* layout)
 {
-    // Trace |this| and any extra actual arguments for an Ion frame. Tracinging
+    // Trace |this| and any extra actual arguments for an Ion frame. Tracing
     // of formal arguments is taken care of by the frame's safepoint/snapshot,
     // except when the script might have lazy arguments or rest, in which case
     // we trace them as well. We also have to trace formals if we have a
-    // LazyLink frame.
-
-    JitFrameLayout* layout = frame.isExitFrameLayout<LazyLinkExitFrameLayout>()
-                             ? frame.exitFrame()->as<LazyLinkExitFrameLayout>()->jsFrame()
-                             : frame.jsFrame();
+    // LazyLink frame or an InterpreterStub frame or a special JSJit to wasm
+    // frame (since wasm doesn't use snapshots).
 
     if (!CalleeTokenIsFunction(layout->calleeToken()))
         return;
@@ -852,7 +835,8 @@ TraceThisAndArguments(JSTracer* trc, const JSJitFrameIter& frame)
     size_t nformals = 0;
 
     JSFunction* fun = CalleeTokenToFunction(layout->calleeToken());
-    if (!frame.isExitFrameLayout<LazyLinkExitFrameLayout>() &&
+    if (frame.type() != JitFrame_JSJitToWasm &&
+        !frame.isExitFrameLayout<CalledFromJitExitFrameLayout>() &&
         !fun->nonLazyScript()->mayReadFrameArgsDirectly())
     {
         nformals = fun->nargs();
@@ -905,7 +889,7 @@ TraceIonJSFrame(JSTracer* trc, const JSJitFrameIter& frame)
         ionScript = frame.ionScriptFromCalleeToken();
     }
 
-    TraceThisAndArguments(trc, frame);
+    TraceThisAndArguments(trc, frame, frame.jsFrame());
 
     const SafepointIndex* si = ionScript->getSafepointIndex(frame.returnAddressToFp());
 
@@ -963,7 +947,7 @@ TraceBailoutFrame(JSTracer* trc, const JSJitFrameIter& frame)
 
     // We have to trace the list of actual arguments, as only formal arguments
     // are represented in the Snapshot.
-    TraceThisAndArguments(trc, frame);
+    TraceThisAndArguments(trc, frame, frame.jsFrame());
 
     // Under a bailout, do not have a Safepoint to only iterate over GC-things.
     // Thus we use a SnapshotIterator to trace all the locations which would be
@@ -990,8 +974,8 @@ TraceBailoutFrame(JSTracer* trc, const JSJitFrameIter& frame)
 
 }
 
-void
-UpdateIonJSFrameForMinorGC(JSTracer* trc, const JSJitFrameIter& frame)
+static void
+UpdateIonJSFrameForMinorGC(const JSJitFrameIter& frame)
 {
     // Minor GCs may move slots/elements allocated in the nursery. Update
     // any slots/elements pointers stored in this frame.
@@ -1100,13 +1084,6 @@ TraceJitExitFrame(JSTracer* trc, const JSJitFrameIter& frame)
 {
     ExitFooterFrame* footer = frame.exitFrame()->footer();
 
-    // Trace the code of the code handling the exit path.  This is needed because
-    // invalidated script are no longer traced because data are erased by the
-    // invalidation and relocation data are no longer reliable.  So the VM
-    // wrapper or the invalidation code may be GC if no JitCode keep reference
-    // on them.
-    MOZ_ASSERT(uintptr_t(footer->jitCode()) != uintptr_t(-1));
-
     // This corresponds to the case where we have build a fake exit frame which
     // handles the case of a native function call. We need to trace the argument
     // vector of the function call, and also new.target if it was a constructing
@@ -1128,23 +1105,6 @@ TraceJitExitFrame(JSTracer* trc, const JSJitFrameIter& frame)
         TraceRoot(trc, oolnative->vp(), "iol-ool-native-vp");
         size_t len = oolnative->argc() + 1;
         TraceRootRange(trc, len, oolnative->thisp(), "ion-ool-native-thisargs");
-        return;
-    }
-
-    if (frame.isExitFrameLayout<IonOOLPropertyOpExitFrameLayout>() ||
-        frame.isExitFrameLayout<IonOOLSetterOpExitFrameLayout>())
-    {
-        // A SetterOp frame is a different size, but that's the only relevant
-        // difference between the two. The fields that need tracing are all in
-        // the common base class.
-        IonOOLPropertyOpExitFrameLayout* oolgetter =
-            frame.isExitFrameLayout<IonOOLPropertyOpExitFrameLayout>()
-            ? frame.exitFrame()->as<IonOOLPropertyOpExitFrameLayout>()
-            : frame.exitFrame()->as<IonOOLSetterOpExitFrameLayout>();
-        TraceRoot(trc, oolgetter->stubCode(), "ion-ool-property-op-code");
-        TraceRoot(trc, oolgetter->vp(), "ion-ool-property-op-vp");
-        TraceRoot(trc, oolgetter->id(), "ion-ool-property-op-id");
-        TraceRoot(trc, oolgetter->obj(), "ion-ool-property-op-obj");
         return;
     }
 
@@ -1172,13 +1132,11 @@ TraceJitExitFrame(JSTracer* trc, const JSJitFrameIter& frame)
         return;
     }
 
-    if (frame.isExitFrameLayout<LazyLinkExitFrameLayout>()) {
-        LazyLinkExitFrameLayout* ll = frame.exitFrame()->as<LazyLinkExitFrameLayout>();
-        JitFrameLayout* layout = ll->jsFrame();
-
-        TraceRoot(trc, ll->stubCode(), "lazy-link-code");
-        layout->replaceCalleeToken(TraceCalleeToken(trc, layout->calleeToken()));
-        TraceThisAndArguments(trc, frame);
+    if (frame.isExitFrameLayout<CalledFromJitExitFrameLayout>()) {
+        auto* layout = frame.exitFrame()->as<CalledFromJitExitFrameLayout>();
+        JitFrameLayout* jsLayout = layout->jsFrame();
+        jsLayout->replaceCalleeToken(TraceCalleeToken(trc, jsLayout->calleeToken()));
+        TraceThisAndArguments(trc, frame, jsLayout);
         return;
     }
 
@@ -1188,11 +1146,10 @@ TraceJitExitFrame(JSTracer* trc, const JSJitFrameIter& frame)
         return;
     }
 
-    TraceRoot(trc, footer->addressOfJitCode(), "ion-exit-code");
+    MOZ_ASSERT(frame.exitFrame()->isWrapperExit());
 
     const VMFunction* f = footer->function();
-    if (f == nullptr)
-        return;
+    MOZ_ASSERT(f);
 
     // Trace arguments of the VM wrapper.
     uint8_t* argBase = frame.exitFrame()->argBase();
@@ -1276,6 +1233,16 @@ TraceRectifierFrame(JSTracer* trc, const JSJitFrameIter& frame)
 }
 
 static void
+TraceJSJitToWasmFrame(JSTracer* trc, const JSJitFrameIter& frame)
+{
+    // This is doing a subset of TraceIonJSFrame, since the callee doesn't
+    // have a script.
+    JitFrameLayout* layout = (JitFrameLayout*)frame.fp();
+    layout->replaceCalleeToken(TraceCalleeToken(trc, layout->calleeToken()));
+    TraceThisAndArguments(trc, frame, layout);
+}
+
+static void
 TraceJitActivation(JSTracer* trc, JitActivation* activation)
 {
 #ifdef CHECK_OSIPOINT_REGISTERS
@@ -1316,8 +1283,12 @@ TraceJitActivation(JSTracer* trc, JitActivation* activation)
                 TraceIonICCallFrame(trc, jitFrame);
                 break;
               case JitFrame_WasmToJSJit:
-                // Ignore: this is a marked used to let the JitFrameIter the
-                // frame above is a wasm frame, handled in the next iteration.
+                // Ignore: this is a special marker used to let the
+                // JitFrameIter know the frame above is a wasm frame, handled
+                // in the next iteration.
+                break;
+              case JitFrame_JSJitToWasm:
+                TraceJSJitToWasmFrame(trc, jitFrame);
                 break;
               default:
                 MOZ_CRASH("unexpected frame type");
@@ -1337,7 +1308,7 @@ TraceJitActivations(JSContext* cx, const CooperatingContext& target, JSTracer* t
 }
 
 void
-UpdateJitActivationsForMinorGC(JSRuntime* rt, JSTracer* trc)
+UpdateJitActivationsForMinorGC(JSRuntime* rt)
 {
     MOZ_ASSERT(JS::CurrentThreadIsHeapMinorCollecting());
     JSContext* cx = TlsContext.get();
@@ -1345,7 +1316,7 @@ UpdateJitActivationsForMinorGC(JSRuntime* rt, JSTracer* trc)
         for (JitActivationIterator activations(cx, target); !activations.done(); ++activations) {
             for (OnlyJSJitFrameIter iter(activations); !iter.done(); ++iter) {
                 if (iter.frame().type() == JitFrame_IonJS)
-                    UpdateIonJSFrameForMinorGC(trc, iter.frame());
+                    UpdateIonJSFrameForMinorGC(iter.frame());
             }
         }
     }
@@ -1789,12 +1760,7 @@ SnapshotIterator::maybeRead(const RValueAllocation& a, MaybeReadFallback& fallba
 void
 SnapshotIterator::writeAllocationValuePayload(const RValueAllocation& alloc, const Value& v)
 {
-    uintptr_t payload = *v.payloadUIntPtr();
-#if defined(JS_PUNBOX64)
-    // Do not write back the tag, as this will trigger an assertion when we will
-    // reconstruct the JS Value while tracing again or when bailing out.
-    payload &= JSVAL_PAYLOAD_MASK;
-#endif
+    MOZ_ASSERT(v.isGCThing());
 
     switch (alloc.mode()) {
       case RValueAllocation::CONSTANT:
@@ -1810,7 +1776,7 @@ SnapshotIterator::writeAllocationValuePayload(const RValueAllocation& alloc, con
         break;
 
       case RValueAllocation::TYPED_REG:
-        machine_->write(alloc.reg2(), payload);
+        machine_->write(alloc.reg2(), uintptr_t(v.toGCThing()));
         break;
 
       case RValueAllocation::TYPED_STACK:
@@ -1821,7 +1787,7 @@ SnapshotIterator::writeAllocationValuePayload(const RValueAllocation& alloc, con
           case JSVAL_TYPE_STRING:
           case JSVAL_TYPE_SYMBOL:
           case JSVAL_TYPE_OBJECT:
-            WriteFrameSlot(fp_, alloc.stackOffset2(), payload);
+            WriteFrameSlot(fp_, alloc.stackOffset2(), uintptr_t(v.toGCThing()));
             break;
         }
         break;
@@ -1829,12 +1795,12 @@ SnapshotIterator::writeAllocationValuePayload(const RValueAllocation& alloc, con
 #if defined(JS_NUNBOX32)
       case RValueAllocation::UNTYPED_REG_REG:
       case RValueAllocation::UNTYPED_STACK_REG:
-        machine_->write(alloc.reg2(), payload);
+        machine_->write(alloc.reg2(), uintptr_t(v.toGCThing()));
         break;
 
       case RValueAllocation::UNTYPED_REG_STACK:
       case RValueAllocation::UNTYPED_STACK_STACK:
-        WriteFrameSlot(fp_, alloc.stackOffset2(), payload);
+        WriteFrameSlot(fp_, alloc.stackOffset2(), uintptr_t(v.toGCThing()));
         break;
 #elif defined(JS_PUNBOX64)
       case RValueAllocation::UNTYPED_REG:
@@ -2264,14 +2230,9 @@ MachineState::FromBailout(RegisterDump::GPRArray& regs, RegisterDump::FPUArray& 
     for (unsigned i = 0; i < FloatRegisters::TotalSingle; i++)
         machine.setRegisterLocation(FloatRegister(i, FloatRegister::Single), (double*)&fbase[i]);
 #elif defined(JS_CODEGEN_MIPS32)
-    float* fbase = (float*)&fpregs[0];
-    for (unsigned i = 0; i < FloatRegisters::TotalDouble; i++) {
-        machine.setRegisterLocation(FloatRegister::FromIndex(i, FloatRegister::Double),
-                                    &fpregs[i].d);
-    }
-    for (unsigned i = 0; i < FloatRegisters::TotalSingle; i++) {
-        machine.setRegisterLocation(FloatRegister::FromIndex(i, FloatRegister::Single),
-                                    (double*)&fbase[i]);
+    for (unsigned i = 0; i < FloatRegisters::TotalPhys; i++) {
+        machine.setRegisterLocation(FloatRegister::FromIndex(i, FloatRegister::Double), &fpregs[i]);
+        machine.setRegisterLocation(FloatRegister::FromIndex(i, FloatRegister::Single), &fpregs[i]);
     }
 #elif defined(JS_CODEGEN_MIPS64)
     for (unsigned i = 0; i < FloatRegisters::TotalPhys; i++) {
@@ -2441,7 +2402,7 @@ AssertJitStackInvariants(JSContext* cx)
                 prevFrameSize = frameSize;
                 frameSize = callerFp - calleeFp;
 
-                if (frames.prevType() == JitFrame_Rectifier) {
+                if (frames.isScripted() && frames.prevType() == JitFrame_Rectifier) {
                     MOZ_RELEASE_ASSERT(frameSize % JitStackAlignment == 0,
                       "The rectifier frame should keep the alignment");
 

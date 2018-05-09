@@ -1,8 +1,5 @@
-commit a456b0a390bb0f70b4cb8d38cb5ab0ecb557a851
-Merge: db05f2f 297502b
-Author: Rick Waldron <waldron.rick@gmail.com>
-Date:   Mon Oct 23 11:02:44 2017 -0400
+commit 82c6148980332febe92a544a1fb653718e9fdb57
+Author: André Bargull <andre.bargull@gmail.com>
+Date:   Thu Feb 1 11:04:51 2018 -0800
 
-    Merge pull request #1310 from bocoup/contributing
-    
-    CONTRIBUTING.md Fix mistake in test generation section
+    Add missing closing parenthesis and remove invalid async flag (#1402)

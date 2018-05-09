@@ -10,9 +10,8 @@
 
 #include "jsnum.h"
 
-#include "mozilla/double-conversion.h"
+#include "mozilla/ArrayUtils.h"
 #include "mozilla/FloatingPoint.h"
-#include "mozilla/PodOperations.h"
 #include "mozilla/RangedPtr.h"
 
 #ifdef HAVE_LOCALECONV
@@ -21,22 +20,21 @@
 #include <math.h>
 #include <string.h>
 
-#include "jsatom.h"
-#include "jscntxt.h"
-#include "jsdtoa.h"
-#include "jsobj.h"
-#include "jsstr.h"
 #include "jstypes.h"
 
+#include "builtin/String.h"
+#include "double-conversion/double-conversion.h"
 #include "js/Conversions.h"
+#include "util/DoubleToString.h"
+#include "util/StringBuffer.h"
 #include "vm/GlobalObject.h"
-#include "vm/StringBuffer.h"
-
-#include "jsatominlines.h"
+#include "vm/JSAtom.h"
+#include "vm/JSContext.h"
+#include "vm/JSObject.h"
 
 #include "vm/NativeObject-inl.h"
 #include "vm/NumberObject-inl.h"
-#include "vm/String-inl.h"
+#include "vm/StringType-inl.h"
 
 using namespace js;
 
@@ -44,7 +42,6 @@ using mozilla::Abs;
 using mozilla::ArrayLength;
 using mozilla::MinNumberValue;
 using mozilla::NegativeInfinity;
-using mozilla::PodCopy;
 using mozilla::PositiveInfinity;
 using mozilla::RangedPtr;
 
@@ -94,12 +91,7 @@ ComputeAccurateDecimalInteger(JSContext* cx, const CharT* start, const CharT* en
         return false;
 
     char* estr;
-    int err = 0;
-    *dp = js_strtod_harder(cx->dtoaState, cstr, &estr, &err);
-    if (err == JS_DTOA_ENOMEM) {
-        ReportOutOfMemory(cx);
-        return false;
-    }
+    *dp = js_strtod_harder(cx->dtoaState, cstr, &estr);
 
     return true;
 }
@@ -535,7 +527,6 @@ Extract(const Value& v)
     return v.toObject().as<NumberObject>().unbox();
 }
 
-#if JS_HAS_TOSOURCE
 MOZ_ALWAYS_INLINE bool
 num_toSource_impl(JSContext* cx, const CallArgs& args)
 {
@@ -562,7 +553,6 @@ num_toSource(JSContext* cx, unsigned argc, Value* vp)
     CallArgs args = CallArgsFromVp(argc, vp);
     return CallNonGenericMethod<IsNumber, num_toSource_impl>(cx, args);
 }
-#endif
 
 ToCStringBuf::ToCStringBuf() : dbuf(nullptr)
 {
@@ -1102,9 +1092,7 @@ num_toPrecision(JSContext* cx, unsigned argc, Value* vp)
 }
 
 static const JSFunctionSpec number_methods[] = {
-#if JS_HAS_TOSOURCE
     JS_FN(js_toSource_str,       num_toSource,          0, 0),
-#endif
     JS_FN(js_toString_str,       num_toString,          1, 0),
 #if EXPOSE_INTL_API
     JS_SELF_HOSTED_FN(js_toLocaleString_str, "Number_toLocaleString", 0,0),
@@ -1846,9 +1834,8 @@ js_strtod(JSContext* cx, const CharT* begin, const CharT* end, const CharT** dEn
         return false;
 
     /* Everything else. */
-    int err;
     char* ep;
-    *d = js_strtod_harder(cx->dtoaState, chars.begin(), &ep, &err);
+    *d = js_strtod_harder(cx->dtoaState, chars.begin(), &ep);
 
     MOZ_ASSERT(ep >= chars.begin());
 

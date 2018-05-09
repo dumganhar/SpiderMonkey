@@ -7,8 +7,7 @@
 #ifndef js_TracingAPI_h
 #define js_TracingAPI_h
 
-#include "jsalloc.h"
-
+#include "js/AllocPolicy.h"
 #include "js/HashTable.h"
 #include "js/HeapAPI.h"
 #include "js/TraceKind.h"
@@ -90,6 +89,10 @@ class JS_PUBLIC_API(JSTracer)
 #ifdef DEBUG
     bool checkEdges() { return checkEdges_; }
 #endif
+
+    // Get the current GC number. Only call this method if |isMarkingTracer()|
+    // is true.
+    uint32_t gcNumberForMarking() const;
 
   protected:
     JSTracer(JSRuntime* rt, TracerKindTag tag,

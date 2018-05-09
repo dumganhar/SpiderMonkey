@@ -13,13 +13,9 @@
 #include "mozilla/Sprintf.h"
 
 #include "jsapi.h"
-#include "jscntxt.h"
-#include "jshashutil.h"
-#include "jsobj.h"
-#include "jsprf.h"
-#include "jsscript.h"
-#include "jsstr.h"
+#include "builtin/String.h"
 
+#include "gc/HashUtil.h"
 #include "jit/BaselineJIT.h"
 #include "jit/CompileInfo.h"
 #include "jit/Ion.h"
@@ -28,17 +24,19 @@
 #include "jit/OptimizationTracking.h"
 #include "js/MemoryMetrics.h"
 #include "vm/HelperThreads.h"
+#include "vm/JSContext.h"
+#include "vm/JSObject.h"
+#include "vm/JSScript.h"
 #include "vm/Opcodes.h"
 #include "vm/Printer.h"
 #include "vm/Shape.h"
 #include "vm/Time.h"
 #include "vm/UnboxedObject.h"
 
-#include "jsatominlines.h"
-#include "jsscriptinlines.h"
-
-#include "gc/Iteration-inl.h"
 #include "gc/Marking-inl.h"
+#include "gc/PrivateIterators-inl.h"
+#include "vm/JSAtom-inl.h"
+#include "vm/JSScript-inl.h"
 #include "vm/NativeObject-inl.h"
 
 using namespace js;
@@ -1175,7 +1173,7 @@ class CompilerConstraintInstance : public CompilerConstraint
       : CompilerConstraint(alloc, property), data(data)
     {}
 
-    bool generateTypeConstraint(JSContext* cx, RecompileInfo recompileInfo);
+    bool generateTypeConstraint(JSContext* cx, RecompileInfo recompileInfo) override;
 };
 
 // Constraint generated from a CompilerConstraint when linking the compilation.
@@ -1192,19 +1190,19 @@ class TypeCompilerConstraint : public TypeConstraint
       : compilation(compilation), data(data)
     {}
 
-    const char* kind() { return data.kind(); }
+    const char* kind() override { return data.kind(); }
 
-    void newType(JSContext* cx, TypeSet* source, TypeSet::Type type) {
+    void newType(JSContext* cx, TypeSet* source, TypeSet::Type type) override {
         if (data.invalidateOnNewType(type))
             cx->zone()->types.addPendingRecompile(cx, compilation);
     }
 
-    void newPropertyState(JSContext* cx, TypeSet* source) {
+    void newPropertyState(JSContext* cx, TypeSet* source) override {
         if (data.invalidateOnNewPropertyState(source))
             cx->zone()->types.addPendingRecompile(cx, compilation);
     }
 
-    void newObjectState(JSContext* cx, ObjectGroup* group) {
+    void newObjectState(JSContext* cx, ObjectGroup* group) override {
         // Note: Once the object has unknown properties, no more notifications
         // will be sent on changes to its state, so always invalidate any
         // associated compilations.
@@ -1212,14 +1210,14 @@ class TypeCompilerConstraint : public TypeConstraint
             cx->zone()->types.addPendingRecompile(cx, compilation);
     }
 
-    bool sweep(TypeZone& zone, TypeConstraint** res) {
+    bool sweep(TypeZone& zone, TypeConstraint** res) override {
         if (data.shouldSweep() || compilation.shouldSweep(zone))
             return false;
         *res = zone.typeLifoAlloc().new_<TypeCompilerConstraint<T> >(compilation, data);
         return true;
     }
 
-    JSCompartment* maybeCompartment() {
+    JSCompartment* maybeCompartment() override {
         return data.maybeCompartment();
     }
 };
@@ -1389,9 +1387,9 @@ class TypeConstraintFreezeStack : public TypeConstraint
         : script_(script)
     {}
 
-    const char* kind() { return "freezeStack"; }
+    const char* kind() override { return "freezeStack"; }
 
-    void newType(JSContext* cx, TypeSet* source, TypeSet::Type type) {
+    void newType(JSContext* cx, TypeSet* source, TypeSet::Type type) override {
         /*
          * Unlike TypeConstraintFreeze, triggering this constraint once does
          * not disable it on future changes to the type set.
@@ -1399,14 +1397,14 @@ class TypeConstraintFreezeStack : public TypeConstraint
         cx->zone()->types.addPendingRecompile(cx, script_);
     }
 
-    bool sweep(TypeZone& zone, TypeConstraint** res) {
+    bool sweep(TypeZone& zone, TypeConstraint** res) override {
         if (IsAboutToBeFinalizedUnbarriered(&script_))
             return false;
         *res = zone.typeLifoAlloc().new_<TypeConstraintFreezeStack>(script_);
         return true;
     }
 
-    JSCompartment* maybeCompartment() {
+    JSCompartment* maybeCompartment() override {
         return script_->compartment();
     }
 };
@@ -2020,7 +2018,9 @@ class ConstraintDataFreezePropertyState
       : which(which)
     {}
 
-    const char* kind() { return (which == NON_DATA) ? "freezeNonDataProperty" : "freezeNonWritableProperty"; }
+    const char* kind() {
+        return (which == NON_DATA) ? "freezeNonDataProperty" : "freezeNonWritableProperty";
+    }
 
     bool invalidateOnNewType(TypeSet::Type type) { return false; }
     bool invalidateOnNewPropertyState(TypeSet* property) {
@@ -2360,10 +2360,13 @@ TemporaryTypeSet::getTypedArrayType(CompilerConstraintList* constraints,
 }
 
 bool
-TemporaryTypeSet::isDOMClass(CompilerConstraintList* constraints)
+TemporaryTypeSet::isDOMClass(CompilerConstraintList* constraints, DOMObjectKind* kind)
 {
     if (unknownObject())
         return false;
+
+    *kind = DOMObjectKind::Unknown;
+    bool isFirst = true;
 
     unsigned count = getObjectCount();
     for (unsigned i = 0; i < count; i++) {
@@ -2372,6 +2375,15 @@ TemporaryTypeSet::isDOMClass(CompilerConstraintList* constraints)
             continue;
         if (!clasp->isDOMClass() || !getObject(i)->hasStableClassAndProto(constraints))
             return false;
+
+        DOMObjectKind thisKind = clasp->isProxy() ? DOMObjectKind::Proxy : DOMObjectKind::Native;
+        if (isFirst) {
+            *kind = thisKind;
+            isFirst = false;
+            continue;
+        }
+        if (*kind != thisKind)
+            *kind = DOMObjectKind::Unknown;
     }
 
     return count > 0;
@@ -2394,27 +2406,6 @@ TemporaryTypeSet::maybeCallable(CompilerConstraintList* constraints)
         if (clasp->isProxy() || clasp->nonProxyCallable())
             return true;
         if (!getObject(i)->hasStableClassAndProto(constraints))
-            return true;
-    }
-
-    return false;
-}
-
-bool
-TemporaryTypeSet::maybeProxy(CompilerConstraintList* constraints)
-{
-    if (!maybeObject())
-        return false;
-
-    if (unknownObject())
-        return true;
-
-    unsigned count = getObjectCount();
-    for (unsigned i = 0; i < count; i++) {
-        const Class* clasp = getObjectClass(i);
-        if (!clasp)
-            continue;
-        if (clasp->isProxy() || !getObject(i)->hasStableClassAndProto(constraints))
             return true;
     }
 
@@ -3143,9 +3134,9 @@ class TypeConstraintClearDefiniteGetterSetter : public TypeConstraint
       : group(group)
     {}
 
-    const char* kind() { return "clearDefiniteGetterSetter"; }
+    const char* kind() override { return "clearDefiniteGetterSetter"; }
 
-    void newPropertyState(JSContext* cx, TypeSet* source) {
+    void newPropertyState(JSContext* cx, TypeSet* source) override {
         /*
          * Clear out the newScript shape and definite property information from
          * an object if the source type set could be a setter or could be
@@ -3155,16 +3146,16 @@ class TypeConstraintClearDefiniteGetterSetter : public TypeConstraint
             group->clearNewScript(cx);
     }
 
-    void newType(JSContext* cx, TypeSet* source, TypeSet::Type type) {}
+    void newType(JSContext* cx, TypeSet* source, TypeSet::Type type) override {}
 
-    bool sweep(TypeZone& zone, TypeConstraint** res) {
+    bool sweep(TypeZone& zone, TypeConstraint** res) override {
         if (IsAboutToBeFinalizedUnbarriered(&group))
             return false;
         *res = zone.typeLifoAlloc().new_<TypeConstraintClearDefiniteGetterSetter>(group);
         return true;
     }
 
-    JSCompartment* maybeCompartment() {
+    JSCompartment* maybeCompartment() override {
         return group->compartment();
     }
 };
@@ -3209,21 +3200,21 @@ class TypeConstraintClearDefiniteSingle : public TypeConstraint
       : group(group)
     {}
 
-    const char* kind() { return "clearDefiniteSingle"; }
+    const char* kind() override { return "clearDefiniteSingle"; }
 
-    void newType(JSContext* cx, TypeSet* source, TypeSet::Type type) {
+    void newType(JSContext* cx, TypeSet* source, TypeSet::Type type) override {
         if (source->baseFlags() || source->getObjectCount() > 1)
             group->clearNewScript(cx);
     }
 
-    bool sweep(TypeZone& zone, TypeConstraint** res) {
+    bool sweep(TypeZone& zone, TypeConstraint** res) override {
         if (IsAboutToBeFinalizedUnbarriered(&group))
             return false;
         *res = zone.typeLifoAlloc().new_<TypeConstraintClearDefiniteSingle>(group);
         return true;
     }
 
-    JSCompartment* maybeCompartment() {
+    JSCompartment* maybeCompartment() override {
         return group->compartment();
     }
 };
@@ -3337,6 +3328,8 @@ js::TypeMonitorResult(JSContext* cx, JSScript* script, jsbytecode* pc, StackType
     assertSameCompartment(cx, script, type);
 
     AutoEnterAnalysis enter(cx);
+
+    script->maybeSweepTypes(nullptr);
 
     MOZ_ASSERT(types == TypeScript::BytecodeTypes(script, pc));
     MOZ_ASSERT(!types->hasType(type));
@@ -3507,7 +3500,7 @@ PreliminaryObjectArray::sweep()
             JSObject* obj = *ptr;
             GlobalObject* global = obj->compartment()->unsafeUnbarrieredMaybeGlobal();
             if (global && !obj->isSingleton()) {
-                JSObject* objectProto = GetBuiltinPrototypePure(global, JSProto_Object);
+                JSObject* objectProto = global->maybeGetPrototype(JSProto_Object);
                 obj->setGroup(objectProto->groupRaw());
                 MOZ_ASSERT(obj->is<NativeObject>());
                 MOZ_ASSERT(obj->getClass() == objectProto->getClass());
@@ -3956,6 +3949,10 @@ TypeNewScript::maybeAnalyze(JSContext* cx, ObjectGroup* group, bool* regenerate,
     group->detachNewScript();
     initialGroup->setNewScript(this);
 
+    // prefixShape was read via a weak pointer, so we need a read barrier before
+    // we store it into the heap.
+    Shape::readBarrier(prefixShape);
+
     initializedShape_ = prefixShape;
     initializedGroup_ = group;
 
@@ -4312,6 +4309,8 @@ ObjectGroup::sweep(AutoClearTypeInferenceStateOnOOM* oom)
     Maybe<AutoClearTypeInferenceStateOnOOM> fallbackOOM;
     EnsureHasAutoClearTypeInferenceStateOnOOM(oom, zone(), fallbackOOM);
 
+    AutoTouchingGrayThings tgt;
+
     if (maybeUnboxedLayout()) {
         // Remove unboxed layouts that are about to be finalized from the
         // compartment wide list while we are still on the active thread.
@@ -4524,7 +4523,7 @@ TypeZone::~TypeZone()
 }
 
 void
-TypeZone::beginSweep(FreeOp* fop, bool releaseTypes, AutoClearTypeInferenceStateOnOOM& oom)
+TypeZone::beginSweep(bool releaseTypes, AutoClearTypeInferenceStateOnOOM& oom)
 {
     MOZ_ASSERT(zone()->isGCSweepingOrCompacting());
     MOZ_ASSERT(!sweepCompilerOutputs);

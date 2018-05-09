@@ -11,6 +11,7 @@ import json
 import logging
 import operator
 import os
+import re
 import subprocess
 import sys
 
@@ -30,6 +31,7 @@ from mach.decorators import (
 from mach.main import Mach
 
 from mozbuild.base import (
+    BuildEnvironmentNotFoundException,
     MachCommandBase,
     MachCommandConditions as conditions,
     MozbuildObject,
@@ -274,8 +276,10 @@ class CargoProvider(MachCommandBase):
 
     @SubCommand('cargo', 'check',
                 description='Run `cargo check` on a given crate.  Defaults to gkrust.')
+    @CommandArgument('--all-crates', default=None, action='store_true',
+        help='Check all of the crates in the tree.')
     @CommandArgument('crates', default=None, nargs='*', help='The crate name(s) to check.')
-    def check(self, crates=None):
+    def check(self, all_crates=None, crates=None):
         # XXX duplication with `mach vendor rust`
         crates_and_roots = {
             'gkrust': 'toolkit/library/rust',
@@ -285,7 +289,9 @@ class CargoProvider(MachCommandBase):
             'geckodriver': 'testing/geckodriver',
         }
 
-        if crates == None:
+        if all_crates:
+            crates = crates_and_roots.keys()
+        elif crates == None or crates == []:
             crates = ['gkrust']
 
         for crate in crates:
@@ -335,6 +341,26 @@ class Clobber(MachCommandBase):
     @CommandArgument('--full', action='store_true',
         help='Perform a full clobber')
     def clobber(self, what, full=False):
+        """Clean up the source and object directories.
+
+        Performing builds and running various commands generate various files.
+
+        Sometimes it is necessary to clean up these files in order to make
+        things work again. This command can be used to perform that cleanup.
+
+        By default, this command removes most files in the current object
+        directory (where build output is stored). Some files (like Visual
+        Studio project files) are not removed by default. If you would like
+        to remove the object directory in its entirety, run with `--full`.
+
+        The `python` target will clean up various generated Python files from
+        the source directory and will remove untracked files from well-known
+        directories containing Python packages. Run this to remove .pyc files,
+        compiled C extensions, etc. Note: all files not tracked or ignored by
+        version control in well-known Python package directories will be
+        deleted. Run the `status` command of your VCS to see if any untracked
+        files you haven't committed yet will be deleted.
+        """
         invalid = set(what) - set(self.CLOBBER_CHOICES)
         if invalid:
             print('Unknown clobber target(s): {}'.format(', '.join(invalid)))
@@ -356,13 +382,25 @@ class Clobber(MachCommandBase):
 
         if 'python' in what:
             if conditions.is_hg(self):
-                cmd = ['hg', 'purge', '--all', '-I', 'glob:**.py[co]']
+                cmd = ['hg', 'purge', '--all', '-I', 'glob:**.py[cdo]',
+                       '-I', 'path:python/', '-I', 'path:third_party/python/']
             elif conditions.is_git(self):
-                cmd = ['git', 'clean', '-f', '-x', '*.py[co]']
+                cmd = ['git', 'clean', '-f', '-x', '*.py[cdo]', 'python/',
+                       'third_party/python/']
             else:
-                cmd = ['find', '.', '-type', 'f', '-name', '*.py[co]', '-delete']
+                # We don't know what is tracked/untracked if we don't have VCS.
+                # So we can't clean python/ and third_party/python/.
+                cmd = ['find', '.', '-type', 'f', '-name', '*.py[cdo]',
+                       '-delete']
             ret = subprocess.call(cmd, cwd=self.topsrcdir)
         return ret
+
+    @property
+    def substs(self):
+        try:
+            return super(Clobber, self).substs
+        except BuildEnvironmentNotFoundException:
+            return {}
 
 @CommandProvider
 class Logs(MachCommandBase):
@@ -558,7 +596,7 @@ class GTestCommands(MachCommandBase):
                        print_directory=False, ensure_exit_code=True)
 
         app_path = self.get_binary_path('app')
-        args = [app_path, '-unittest'];
+        args = [app_path, '-unittest', '--gtest_death_test_style=threadsafe'];
 
         if debug or debugger or debugger_args:
             args = self.prepend_debugger_args(args, debugger, debugger_args)
@@ -920,33 +958,10 @@ class RunProgram(MachCommandBase):
             if show_dump_stats:
                 dmd_params.append('--show-dump-stats=yes')
 
-            bin_dir = os.path.dirname(binpath)
-            lib_name = self.substs['DLL_PREFIX'] + 'dmd' + self.substs['DLL_SUFFIX']
-            dmd_lib = os.path.join(bin_dir, lib_name)
-            if not os.path.exists(dmd_lib):
-                print("Please build with |--enable-dmd| to use DMD.")
-                return 1
-
-            env_vars = {
-                "Darwin": {
-                    "DYLD_INSERT_LIBRARIES": dmd_lib,
-                    "LD_LIBRARY_PATH": bin_dir,
-                },
-                "Linux": {
-                    "LD_PRELOAD": dmd_lib,
-                    "LD_LIBRARY_PATH": bin_dir,
-                },
-                "WINNT": {
-                    "MOZ_REPLACE_MALLOC_LIB": dmd_lib,
-                },
-            }
-
-            arch = self.substs['OS_ARCH']
-
             if dmd_params:
-                env_vars[arch]["DMD"] = " ".join(dmd_params)
-
-            extra_env.update(env_vars.get(arch, {}))
+                extra_env['DMD'] = ' '.join(dmd_params)
+            else:
+                extra_env['DMD'] = '1'
 
         return self.run_process(args=args, ensure_exit_code=False,
             pass_thru=True, append_env=extra_env)
@@ -1021,7 +1036,7 @@ class MachDebug(MachCommandBase):
     @Command('environment', category='build-dev',
         description='Show info about the mach and build environment.')
     @CommandArgument('--format', default='pretty',
-        choices=['pretty', 'client.mk', 'configure', 'json'],
+        choices=['pretty', 'configure', 'json'],
         help='Print data in the given format.')
     @CommandArgument('--output', '-o', type=str,
         help='Output to the given file.')
@@ -1088,21 +1103,6 @@ class MachDebug(MachCommandBase):
                 print('config defines:', file=out)
                 for k in sorted(config.defines):
                     print('\t%s' % k, file=out)
-
-    def _environment_client_mk(self, out, verbose):
-        if self.mozconfig['make_extra']:
-            for arg in self.mozconfig['make_extra']:
-                print(arg, file=out)
-        if self.mozconfig['make_flags']:
-            print('MOZ_MAKE_FLAGS=%s' % ' '.join(self.mozconfig['make_flags']))
-        objdir = mozpath.normsep(self.topobjdir)
-        print('MOZ_OBJDIR=%s' % objdir, file=out)
-        if 'MOZ_CURRENT_PROJECT' in os.environ:
-            objdir = mozpath.join(objdir, os.environ['MOZ_CURRENT_PROJECT'])
-        print('OBJDIR=%s' % objdir, file=out)
-        if self.mozconfig['path']:
-            print('FOUND_MOZCONFIG=%s' % mozpath.normsep(self.mozconfig['path']),
-                file=out)
 
     def _environment_json(self, out, verbose):
         import json
@@ -1364,18 +1364,10 @@ class PackageFrontend(MachCommandBase):
                          'should be determined in the decision task.')
                 return 1
             from taskgraph.optimize import IndexSearch
-            params = {
-                'message': '',
-                'project': '',
-                'level': os.environ.get('MOZ_SCM_LEVEL', '3'),
-                'base_repository': '',
-                'head_repository': '',
-                'head_rev': '',
-                'moz_build_date': '',
-                'build_date': 0,
-                'pushlog_id': 0,
-                'owner': '',
-            }
+            from taskgraph.parameters import Parameters
+            params = Parameters(
+                level=os.environ.get('MOZ_SCM_LEVEL', '3'),
+                strict=False)
 
             # TODO: move to the taskcluster package
             def tasks(kind_name):
@@ -1414,7 +1406,10 @@ class PackageFrontend(MachCommandBase):
                 if task_id in (True, False) or not artifact_name:
                     self.log(logging.ERROR, 'artifact', {'build': user_value},
                              'Could not find artifacts for a toolchain build '
-                             'named `{build}`')
+                             'named `{build}`. Local commits and other changes '
+                             'in your checkout may cause this error. Try '
+                             'updating to a fresh checkout of mozilla-central '
+                             'to use artifact builds.')
                     return 1
 
                 record = ArtifactRecord(task_id, artifact_name)
@@ -1596,7 +1591,12 @@ class StaticAnalysisMonitor(object):
 
 @CommandProvider
 class StaticAnalysis(MachCommandBase):
-    """Utilities for running C++ static analysis checks."""
+    """Utilities for running C++ static analysis checks and format."""
+
+    # List of file extension to consider (should start with dot)
+    _format_include_extensions = ('.cpp', '.c', '.h')
+    # File contaning all paths to exclude from formatting
+    _format_ignore_file = '.clang-format-ignore'
 
     @Command('static-analysis', category='testing',
              description='Run C++ static analysis checks')
@@ -1616,10 +1616,10 @@ class StaticAnalysis(MachCommandBase):
                           'in the patch streamed through stdin.  This is called '
                           'the diff mode.')
     @CommandArgument('--checks', '-c', default='-*', metavar='checks',
-        help='Static analysis checks to enable.  By default, this enables only '
-             'custom Mozilla checks, but can be any clang-tidy checks syntax.')
+                     help='Static analysis checks to enable.  By default, this enables only '
+                     'custom Mozilla checks, but can be any clang-tidy checks syntax.')
     @CommandArgument('--jobs', '-j', default='0', metavar='jobs', type=int,
-        help='Number of concurrent jobs to run. Default is the number of CPUs.')
+                     help='Number of concurrent jobs to run. Default is the number of CPUs.')
     @CommandArgument('--strip', '-p', default='1', metavar='NUM',
                      help='Strip NUM leading components from file names in diff mode.')
     @CommandArgument('--fix', '-f', default=False, action='store_true',
@@ -1646,7 +1646,7 @@ class StaticAnalysis(MachCommandBase):
         if rc != 0:
             return rc
 
-        rc = self._get_clang_tidy(verbose=verbose)
+        rc = self._get_clang_tools(verbose=verbose)
         if rc != 0:
             return rc
 
@@ -1699,9 +1699,9 @@ class StaticAnalysis(MachCommandBase):
     @StaticAnalysisSubCommand('static-analysis', 'install',
                               'Install the static analysis helper tool')
     @CommandArgument('source', nargs='?', type=str,
-                     help='Where to fetch a local archive containing the clang-tidy helper tool.'
-                          'It will be installed in ~/.mozbuild/clang-tidy/.'
-                          'Can be omitted, in which case the latest clang-tidy '
+                     help='Where to fetch a local archive containing the static-analysis and format helper tool.'
+                          'It will be installed in ~/.mozbuild/clang-tools/.'
+                          'Can be omitted, in which case the latest clang-tools '
                           ' helper for the platform would be automatically '
                           'detected and installed.')
     @CommandArgument('--skip-cache', action='store_true',
@@ -1709,16 +1709,16 @@ class StaticAnalysis(MachCommandBase):
                      default=False)
     def install(self, source=None, skip_cache=False, verbose=False):
         self._set_log_level(verbose)
-        rc = self._get_clang_tidy(force=True, skip_cache=skip_cache,
-                                  source=source, verbose=verbose)
+        rc = self._get_clang_tools(force=True, skip_cache=skip_cache,
+                                   source=source, verbose=verbose)
         return rc
 
     @StaticAnalysisSubCommand('static-analysis', 'clear-cache',
                               'Delete local helpers and reset static analysis helper tool cache')
     def clear_cache(self, verbose=False):
         self._set_log_level(verbose)
-        rc = self._get_clang_tidy(force=True, download_if_needed=False,
-                                  verbose=verbose)
+        rc = self._get_clang_tools(force=True, download_if_needed=False,
+                                   verbose=verbose)
         if rc != 0:
             return rc
 
@@ -1728,11 +1728,34 @@ class StaticAnalysis(MachCommandBase):
                               'Print a list of the static analysis checks performed by default')
     def print_checks(self, verbose=False):
         self._set_log_level(verbose)
-        rc = self._get_clang_tidy(verbose=verbose)
+        rc = self._get_clang_tools(verbose=verbose)
         if rc != 0:
             return rc
         args = [self._clang_tidy_path, '-list-checks', '-checks=-*,mozilla-*']
         return self._run_command_in_objdir(args=args, pass_thru=True)
+
+    @Command('clang-format',  category='misc', description='Run clang-format on current changes')
+    @CommandArgument('--show', '-s', action='store_true', default=False,
+                     help='Show diff output on instead of applying changes')
+    @CommandArgument('--path', '-p', nargs='+', default=None,
+                     help='Specify the path(s) to reformat')
+    def clang_format(self, show, path, verbose=False):
+        # Run clang-format or clang-format-diff on the local changes
+        # or files/directories
+        if path is not None:
+            path = self._conv_to_abspath(path)
+
+        os.chdir(self.topsrcdir)
+
+        rc = self._get_clang_tools(verbose=verbose)
+        if rc != 0:
+            return rc
+
+        if path is None:
+            return self._run_clang_format_diff(self._clang_format_diff,
+                                               self._clang_format_path, show)
+        else:
+            return self._run_clang_format_path(self._clang_format_path, show, path)
 
     def _get_checks(self):
         checks = '-*'
@@ -1811,24 +1834,33 @@ class StaticAnalysis(MachCommandBase):
                                  line_handler=None, silent=not verbose,
                                  num_jobs=jobs)
 
-    def _get_clang_tidy(self, force=False, skip_cache=False,
-                        source=None, download_if_needed=True,
-                        verbose=False):
+    def _conv_to_abspath(self, paths):
+            # Converts all the paths to absolute pathnames
+        tmp_path = []
+        for f in paths:
+            tmp_path.append(os.path.abspath(f))
+        return tmp_path
+
+    def _get_clang_tools(self, force=False, skip_cache=False,
+                         source=None, download_if_needed=True,
+                         verbose=False):
         rc, config, _ = self._get_config_environment()
 
         if rc != 0:
             return rc
 
-        clang_tidy_path = mozpath.join(self._mach_context.state_dir,
-                                       "clang-tidy")
-        self._clang_tidy_path = mozpath.join(clang_tidy_path, "clang", "bin",
+        clang_tools_path = mozpath.join(self._mach_context.state_dir,
+                                        "clang-tools")
+        self._clang_tidy_path = mozpath.join(clang_tools_path, "clang", "bin",
                                              "clang-tidy" + config.substs.get('BIN_SUFFIX', ''))
-        self._clang_format_path = mozpath.join(clang_tidy_path, "clang", "bin",
-                                             "clang-format" + config.substs.get('BIN_SUFFIX', ''))
-        self._clang_apply_replacements = mozpath.join(clang_tidy_path, "clang", "bin",
+        self._clang_format_path = mozpath.join(clang_tools_path, "clang", "bin",
+                                               "clang-format" + config.substs.get('BIN_SUFFIX', ''))
+        self._clang_apply_replacements = mozpath.join(clang_tools_path, "clang", "bin",
                                                       "clang-apply-replacements" + config.substs.get('BIN_SUFFIX', ''))
-        self._run_clang_tidy_path = mozpath.join(clang_tidy_path, "clang", "share",
+        self._run_clang_tidy_path = mozpath.join(clang_tools_path, "clang", "share",
                                                  "clang", "run-clang-tidy.py")
+        self._clang_format_diff = mozpath.join(clang_tools_path, "clang", "share",
+                                               "clang", "clang-format-diff.py")
 
         if os.path.exists(self._clang_tidy_path) and \
            os.path.exists(self._clang_format_path) and \
@@ -1837,20 +1869,20 @@ class StaticAnalysis(MachCommandBase):
            not force:
             return 0
         else:
-            if os.path.isdir(clang_tidy_path) and download_if_needed:
+            if os.path.isdir(clang_tools_path) and download_if_needed:
                 # The directory exists, perhaps it's corrupted?  Delete it
                 # and start from scratch.
                 import shutil
-                shutil.rmtree(clang_tidy_path)
-                return self._get_clang_tidy(force=force, skip_cache=skip_cache,
-                                            source=source, verbose=verbose,
-                                            download_if_needed=download_if_needed)
+                shutil.rmtree(clang_tools_path)
+                return self._get_clang_tools(force=force, skip_cache=skip_cache,
+                                             source=source, verbose=verbose,
+                                             download_if_needed=download_if_needed)
 
             # Create base directory where we store clang binary
-            os.mkdir(clang_tidy_path)
+            os.mkdir(clang_tools_path)
 
             if source:
-                return self._get_clang_tidy_from_source(source)
+                return self._get_clang_tools_from_source(source)
 
             self._artifact_manager = PackageFrontend(self._mach_context)
 
@@ -1868,7 +1900,7 @@ class StaticAnalysis(MachCommandBase):
 
             # We want to unpack data in the clang-tidy mozbuild folder
             currentWorkingDir = os.getcwd()
-            os.chdir(clang_tidy_path)
+            os.chdir(clang_tools_path)
             rc = self._artifact_manager.artifact_toolchain(verbose=verbose,
                                                            skip_cache=skip_cache,
                                                            from_build=[job],
@@ -1879,10 +1911,10 @@ class StaticAnalysis(MachCommandBase):
 
             return rc
 
-    def _get_clang_tidy_from_source(self, filename):
+    def _get_clang_tools_from_source(self, filename):
         from mozbuild.action.tooltool import unpack_file
         clang_tidy_path = mozpath.join(self._mach_context.state_dir,
-                                       "clang-tidy")
+                                       "clang-tools")
 
         currentWorkingDir = os.getcwd()
         os.chdir(clang_tidy_path)
@@ -1902,6 +1934,140 @@ class StaticAnalysis(MachCommandBase):
         assert os.path.exists(self._clang_format_path)
         assert os.path.exists(self._clang_apply_replacements)
         assert os.path.exists(self._run_clang_tidy_path)
+        return 0
+
+    def _get_clang_format_diff_command(self):
+        if self.repository.name == 'hg':
+            args = ["hg", "diff", "-U0", "-r" ".^"]
+            for dot_extension in self._format_include_extensions:
+                args += ['--include', 'glob:**{0}'.format(dot_extension)]
+            args += ['--exclude', 'listfile:{0}'.format(self._format_ignore_file)]
+        else:
+            args = ["git", "diff", "--no-color", "-U0", "HEAD", "--"]
+            for dot_extension in self._format_include_extensions:
+                args += ['*{0}'.format(dot_extension)]
+            # git-diff doesn't support an 'exclude-from-files' param, but
+            # allow to add individual exclude pattern since v1.9, see
+            # https://git-scm.com/docs/gitglossary#gitglossary-aiddefpathspecapathspec
+            with open(self._format_ignore_file, 'rb') as exclude_pattern_file:
+                for pattern in exclude_pattern_file.readlines():
+                    pattern = pattern.rstrip()
+                    pattern = pattern.replace('.*', '**')
+                    if not pattern or pattern.startswith('#'):
+                        continue  # empty or comment
+                    magics = ['exclude']
+                    if pattern.startswith('^'):
+                        magics += ['top']
+                        pattern = pattern[1:]
+                    args += [':({0}){1}'.format(','.join(magics), pattern)]
+        return args
+
+    def _run_clang_format_diff(self, clang_format_diff, clang_format, show):
+        # Run clang-format on the diff
+        # Note that this will potentially miss a lot things
+        from subprocess import Popen, PIPE, check_output, CalledProcessError
+
+        diff_process = Popen(self._get_clang_format_diff_command(), stdout=PIPE)
+        args = [sys.executable, clang_format_diff, "-p1", "-binary=%s" % clang_format]
+
+        if not show:
+            args.append("-i")
+        try:
+            output = check_output(args, stdin=diff_process.stdout)
+            if show:
+                # We want to print the diffs
+                print(output)
+            return 0
+        except CalledProcessError as e:
+            # Something wrong happend
+            print("clang-format: An error occured while running clang-format-diff.")
+            return e.returncode
+
+    def _is_ignored_path(self, ignored_dir_re, f):
+        # Remove upto topsrcdir in pathname and match
+        if f.startswith(self.topsrcdir + '/'):
+            match_f = f[len(self.topsrcdir + '/'):]
+        else:
+            match_f = f
+        return re.match(ignored_dir_re, match_f)
+
+    def _generate_path_list(self, paths):
+        path_to_third_party = os.path.join(self.topsrcdir, self._format_ignore_file)
+        ignored_dir = []
+        with open(path_to_third_party, 'r') as fh:
+            for line in fh:
+                # Remove comments and empty lines
+                if line.startswith('#') or len(line.strip()) == 0:
+                    continue
+                # The regexp is to make sure we are managing relative paths
+                ignored_dir.append(r"^[\./]*" + line.rstrip())
+
+        # Generates the list of regexp
+        ignored_dir_re = '(%s)' % '|'.join(ignored_dir)
+        extensions = self._format_include_extensions
+
+        path_list = []
+        for f in paths:
+            if self._is_ignored_path(ignored_dir_re, f):
+                # Early exit if we have provided an ignored directory
+                print("clang-format: Ignored third party code '{0}'".format(f))
+                continue
+
+            if os.path.isdir(f):
+                # Processing a directory, generate the file list
+                for folder, subs, files in os.walk(f):
+                    subs.sort()
+                    for filename in sorted(files):
+                        f_in_dir = os.path.join(folder, filename)
+                        if (f_in_dir.endswith(extensions)
+                            and not self._is_ignored_path(ignored_dir_re, f_in_dir)):
+                            # Supported extension and accepted path
+                            path_list.append(f_in_dir)
+            else:
+                if f.endswith(extensions):
+                    path_list.append(f)
+
+        return path_list
+
+    def _run_clang_format_path(self, clang_format, show, paths):
+        # Run clang-format on files or directories directly
+        from subprocess import check_output, CalledProcessError
+
+        args = [clang_format, "-i"]
+
+        path_list = self._generate_path_list(paths)
+
+        if path_list == []:
+            return
+
+        print("Processing %d file(s)..." % len(path_list))
+
+        batchsize = 200
+
+        for i in range(0, len(path_list), batchsize):
+            l = path_list[i: (i + batchsize)]
+            # Run clang-format on the list
+            try:
+                check_output(args + l)
+            except CalledProcessError as e:
+                # Something wrong happend
+                print("clang-format: An error occured while running clang-format.")
+                return e.returncode
+
+        if show:
+            # show the diff
+            if self.repository.name == 'hg':
+                diff_command = ["hg", "diff"] + paths
+            else:
+                assert self.repository.name == 'git'
+                diff_command = ["git", "diff"] + paths
+            try:
+                output = check_output(diff_command)
+                print(output)
+            except CalledProcessError as e:
+                # Something wrong happend
+                print("clang-format: Unable to run the diff command.")
+                return e.returncode
         return 0
 
 @CommandProvider
@@ -2030,9 +2196,21 @@ class Repackage(MachCommandBase):
         help='Optional package .zip for building a full installer')
     @CommandArgument('--output', '-o', type=str, required=True,
         help='Output filename')
-    def repackage_installer(self, tag, setupexe, package, output):
+    @CommandArgument('--package-name', type=str, required=False,
+        help='Name of the package being rebuilt')
+    @CommandArgument('--sfx-stub', type=str, required=True,
+        help='Path to the self-extraction stub.')
+    def repackage_installer(self, tag, setupexe, package, output, package_name, sfx_stub):
         from mozbuild.repackaging.installer import repackage_installer
-        repackage_installer(self.topsrcdir, tag, setupexe, package, output)
+        repackage_installer(
+            topsrcdir=self.topsrcdir,
+            tag=tag,
+            setupexe=setupexe,
+            package=package,
+            output=output,
+            package_name=package_name,
+            sfx_stub=sfx_stub,
+        )
 
     @SubCommand('repackage', 'mar',
                 description='Repackage into complete MAR file')

@@ -17,12 +17,7 @@
 #include <ctime>
 
 #include "jsapi.h"
-#include "jscntxt.h"
 #include "jsfriendapi.h"
-#include "jsiter.h"
-#include "jsobj.h"
-#include "jsprf.h"
-#include "jswrapper.h"
 
 #include "builtin/Promise.h"
 #include "builtin/SelfHostingDefines.h"
@@ -32,7 +27,7 @@
 #include "irregexp/RegExpEngine.h"
 #include "irregexp/RegExpParser.h"
 #endif
-#include "jit/AtomicOperations.h"
+#include "jit/BaselineJIT.h"
 #include "jit/InlinableNatives.h"
 #include "js/Debug.h"
 #include "js/HashTable.h"
@@ -42,13 +37,20 @@
 #include "js/UbiNodeShortestPaths.h"
 #include "js/UniquePtr.h"
 #include "js/Vector.h"
+#include "js/Wrapper.h"
+#include "util/StringBuffer.h"
+#include "util/Text.h"
+#include "vm/AsyncFunction.h"
+#include "vm/AsyncIteration.h"
 #include "vm/Debugger.h"
 #include "vm/GlobalObject.h"
 #include "vm/Interpreter.h"
+#include "vm/Iteration.h"
+#include "vm/JSContext.h"
+#include "vm/JSObject.h"
 #include "vm/ProxyObject.h"
 #include "vm/SavedStacks.h"
 #include "vm/Stack.h"
-#include "vm/StringBuffer.h"
 #include "vm/TraceLogging.h"
 #include "wasm/AsmJS.h"
 #include "wasm/WasmBinaryToText.h"
@@ -58,11 +60,10 @@
 #include "wasm/WasmTextToBinary.h"
 #include "wasm/WasmTypes.h"
 
-#include "jscntxtinlines.h"
-#include "jsobjinlines.h"
-
 #include "vm/Debugger-inl.h"
 #include "vm/EnvironmentObject-inl.h"
+#include "vm/JSContext-inl.h"
+#include "vm/JSObject-inl.h"
 #include "vm/NativeObject-inl.h"
 
 using namespace js;
@@ -72,7 +73,7 @@ using mozilla::Move;
 
 // If fuzzingSafe is set, remove functionality that could cause problems with
 // fuzzers. Set this via the environment variable MOZ_FUZZING_SAFE.
-static mozilla::Atomic<bool> fuzzingSafe(false);
+mozilla::Atomic<bool> fuzzingSafe(false);
 
 // If disableOOMFunctions is set, disable functionality that causes artificial
 // OOM conditions.
@@ -282,6 +283,17 @@ GetBuildConfiguration(JSContext* cx, unsigned argc, Value* vp)
 }
 
 static bool
+ReturnStringCopy(JSContext* cx, CallArgs& args, const char* message)
+{
+    JSString* str = JS_NewStringCopyZ(cx, message);
+    if (!str)
+        return false;
+
+    args.rval().setString(str);
+    return true;
+}
+
+static bool
 GC(JSContext* cx, unsigned argc, Value* vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
@@ -330,11 +342,7 @@ GC(JSContext* cx, unsigned argc, Value* vp)
     SprintfLiteral(buf, "before %zu, after %zu\n",
                    preBytes, cx->runtime()->gc.usage.gcBytes());
 #endif
-    JSString* str = JS_NewStringCopyZ(cx, buf);
-    if (!str)
-        return false;
-    args.rval().setString(str);
-    return true;
+    return ReturnStringCopy(cx, args, buf);
 }
 
 static bool
@@ -371,8 +379,7 @@ MinorGC(JSContext* cx, unsigned argc, Value* vp)
     _("allocationThreshold",        JSGC_ALLOCATION_THRESHOLD,           true)  \
     _("minEmptyChunkCount",         JSGC_MIN_EMPTY_CHUNK_COUNT,          true)  \
     _("maxEmptyChunkCount",         JSGC_MAX_EMPTY_CHUNK_COUNT,          true)  \
-    _("compactingEnabled",          JSGC_COMPACTING_ENABLED,             true)  \
-    _("refreshFrameSlicesEnabled",  JSGC_REFRESH_FRAME_SLICES_ENABLED,   true)
+    _("compactingEnabled",          JSGC_COMPACTING_ENABLED,             true)
 
 static const struct ParamInfo {
     const char*     name;
@@ -454,17 +461,6 @@ GCParameter(JSContext* cx, unsigned argc, Value* vp)
         return false;
     }
 
-    if (param == JSGC_MAX_BYTES) {
-        uint32_t gcBytes = JS_GetGCParameter(cx, JSGC_BYTES);
-        if (value < gcBytes) {
-            JS_ReportErrorASCII(cx,
-                                "attempt to set maxBytes to the value less than the current "
-                                "gcBytes (%u)",
-                                gcBytes);
-            return false;
-        }
-    }
-
     bool ok;
     {
         JSRuntime* rt = cx->runtime();
@@ -535,6 +531,14 @@ WasmIsSupported(JSContext* cx, unsigned argc, Value* vp)
 }
 
 static bool
+WasmIsSupportedByHardware(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+    args.rval().setBoolean(wasm::HasCompilerSupport(cx));
+    return true;
+}
+
+static bool
 WasmDebuggingIsSupported(JSContext* cx, unsigned argc, Value* vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
@@ -551,16 +555,32 @@ WasmThreadsSupported(JSContext* cx, unsigned argc, Value* vp)
 #else
     bool isSupported = false;
 #endif
+    args.rval().setBoolean(isSupported);
+    return true;
+}
 
-    // NOTE!  When we land thread support, the following test and its comment
-    // should be moved into wasm::HasSupport() or wasm::HasCompilerSupport().
+static bool
+WasmSignExtensionSupported(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+#ifdef ENABLE_WASM_SIGNEXTEND_OPS
+    bool isSupported = true;
+#else
+    bool isSupported = false;
+#endif
+    args.rval().setBoolean(isSupported);
+    return true;
+}
 
-    // Wasm threads require 8-byte lock-free atomics.  This guard will
-    // effectively disable Wasm support for some older devices, such as early
-    // ARMv6 and older MIPS.
-
-    isSupported = isSupported && jit::AtomicOperations::isLockfree8();
-
+static bool
+WasmSaturatingTruncationSupported(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+#ifdef ENABLE_WASM_SATURATING_TRUNC_OPS
+    bool isSupported = true;
+#else
+    bool isSupported = false;
+#endif
     args.rval().setBoolean(isSupported);
     return true;
 }
@@ -613,9 +633,11 @@ WasmTextToBinary(JSContext* cx, unsigned argc, Value* vp)
         }
     }
 
+    uintptr_t stackLimit = GetNativeStackLimit(cx);
+
     wasm::Bytes bytes;
     UniqueChars error;
-    if (!wasm::TextToBinary(twoByteChars.twoByteChars(), &bytes, &error)) {
+    if (!wasm::TextToBinary(twoByteChars.twoByteChars(), stackLimit, &bytes, &error)) {
         JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_WASM_TEXT_FAIL,
                                   error.get() ? error.get() : "out of memory");
         return false;
@@ -750,6 +772,27 @@ WasmExtractCode(JSContext* cx, unsigned argc, Value* vp)
         return false;
 
     args.rval().set(result);
+    return true;
+}
+
+static bool
+WasmHasTier2CompilationCompleted(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+
+    if (!args.get(0).isObject()) {
+        JS_ReportErrorASCII(cx, "argument is not an object");
+        return false;
+    }
+
+    JSObject* unwrapped = CheckedUnwrap(&args.get(0).toObject());
+    if (!unwrapped || !unwrapped->is<WasmModuleObject>()) {
+        JS_ReportErrorASCII(cx, "argument is not a WebAssembly.Module");
+        return false;
+    }
+
+    Rooted<WasmModuleObject*> module(cx, &unwrapped->as<WasmModuleObject>());
+    args.rval().set(BooleanValue(module->module().compilationComplete()));
     return true;
 }
 
@@ -972,11 +1015,7 @@ GCState(JSContext* cx, unsigned argc, Value* vp)
     }
 
     const char* state = StateName(cx->runtime()->gc.state());
-    JSString* str = JS_NewStringCopyZ(cx, state);
-    if (!str)
-        return false;
-    args.rval().setString(str);
-    return true;
+    return ReturnStringCopy(cx, args, state);
 }
 
 static bool
@@ -1419,7 +1458,8 @@ NewMaybeExternalString(JSContext* cx, unsigned argc, Value* vp)
     if (!res)
         return false;
 
-    mozilla::Unused << buf.release();
+    if (allocatedExternal)
+        mozilla::Unused << buf.release();
     args.rval().setString(res);
     return true;
 }
@@ -2054,6 +2094,11 @@ ResolvePromise(JSContext* cx, unsigned argc, Value* vp)
             return false;
     }
 
+    if (IsPromiseForAsync(promise)) {
+        JS_ReportErrorASCII(cx, "async function's promise shouldn't be manually resolved");
+        return false;
+    }
+
     bool result = JS::ResolvePromise(cx, promise, resolution);
     if (result)
         args.rval().setUndefined();
@@ -2079,6 +2124,11 @@ RejectPromise(JSContext* cx, unsigned argc, Value* vp)
         ac.emplace(cx, promise);
         if (!cx->compartment()->wrap(cx, &reason))
             return false;
+    }
+
+    if (IsPromiseForAsync(promise)) {
+        JS_ReportErrorASCII(cx, "async function's promise shouldn't be manually rejected");
+        return false;
     }
 
     bool result = JS::RejectPromise(cx, promise, reason);
@@ -2482,24 +2532,12 @@ testingFunc_inJit(JSContext* cx, unsigned argc, Value* vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
 
-    if (!jit::IsBaselineEnabled(cx)) {
-        JSString* error = JS_NewStringCopyZ(cx, "Baseline is disabled.");
-        if(!error)
-            return false;
-
-        args.rval().setString(error);
-        return true;
-    }
+    if (!jit::IsBaselineEnabled(cx))
+        return ReturnStringCopy(cx, args, "Baseline is disabled.");
 
     JSScript* script = cx->currentScript();
-    if (script && script->getWarmUpResetCount() >= 20) {
-        JSString* error = JS_NewStringCopyZ(cx, "Compilation is being repeatedly prevented. Giving up.");
-        if (!error)
-            return false;
-
-        args.rval().setString(error);
-        return true;
-    }
+    if (script && script->getWarmUpResetCount() >= 20)
+        return ReturnStringCopy(cx, args, "Compilation is being repeatedly prevented. Giving up.");
 
     args.rval().setBoolean(cx->currentlyRunningInJit());
     return true;
@@ -2510,14 +2548,8 @@ testingFunc_inIon(JSContext* cx, unsigned argc, Value* vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
 
-    if (!jit::IsIonEnabled(cx)) {
-        JSString* error = JS_NewStringCopyZ(cx, "Ion is disabled.");
-        if (!error)
-            return false;
-
-        args.rval().setString(error);
-        return true;
-    }
+    if (!jit::IsIonEnabled(cx))
+        return ReturnStringCopy(cx, args, "Ion is disabled.");
 
     if (cx->activation()->hasWasmExitFP()) {
         // Exited through wasm. Note this is false when the fast wasm->jit exit
@@ -2529,20 +2561,14 @@ testingFunc_inIon(JSContext* cx, unsigned argc, Value* vp)
     ScriptFrameIter iter(cx);
     if (!iter.done() && iter.isIon()) {
         // Reset the counter of the IonScript's script.
-        jit::JSJitFrameIter jitIter(cx);
+        jit::JSJitFrameIter jitIter(cx->activation()->asJit());
         ++jitIter;
         jitIter.script()->resetWarmUpResetCounter();
     } else {
         // Check if we missed multiple attempts at compiling the innermost script.
         JSScript* script = cx->currentScript();
-        if (script && script->getWarmUpResetCount() >= 20) {
-            JSString* error = JS_NewStringCopyZ(cx, "Compilation is being repeatedly prevented. Giving up.");
-            if (!error)
-                return false;
-
-            args.rval().setString(error);
-            return true;
-        }
+        if (script && script->getWarmUpResetCount() >= 20)
+            return ReturnStringCopy(cx, args, "Compilation is being repeatedly prevented. Giving up.");
     }
 
     args.rval().setBoolean(!iter.done() && iter.isIon());
@@ -2904,7 +2930,7 @@ const Class CloneBufferObject::class_ = {
 
 const JSPropertySpec CloneBufferObject::props_[] = {
     JS_PSGS("clonebuffer", getCloneBuffer, setCloneBuffer, 0),
-    JS_PSG("arraybuffer", getCloneBufferAsArrayBuffer, 0),
+    JS_PSGS("arraybuffer", getCloneBufferAsArrayBuffer, setCloneBuffer, 0),
     JS_PS_END
 };
 
@@ -3102,6 +3128,17 @@ HelperThreadCount(JSContext* cx, unsigned argc, Value* vp)
     return true;
 }
 
+static bool
+EnableShapeConsistencyChecks(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+#ifdef DEBUG
+    NativeObject::enableShapeConsistencyChecks();
+#endif
+    args.rval().setUndefined();
+    return true;
+}
+
 #ifdef JS_TRACE_LOGGING
 static bool
 EnableTraceLogger(JSContext* cx, unsigned argc, Value* vp)
@@ -3154,7 +3191,7 @@ static bool
 SharedArrayRawBufferCount(JSContext* cx, unsigned argc, Value* vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
-    args.rval().setInt32(SharedArrayRawBuffer::liveBuffers());
+    args.rval().setInt32(LiveMappedBufferCount());
     return true;
 }
 
@@ -3193,19 +3230,14 @@ ObjectAddress(JSContext* cx, unsigned argc, Value* vp)
 
 #ifdef JS_MORE_DETERMINISTIC
     args.rval().setInt32(0);
+    return true;
 #else
     void* ptr = js::UncheckedUnwrap(&args[0].toObject(), true);
     char buffer[64];
     SprintfLiteral(buffer, "%p", ptr);
 
-    JSString* str = JS_NewStringCopyZ(cx, buffer);
-    if (!str)
-        return false;
-
-    args.rval().setString(str);
+    return ReturnStringCopy(cx, args, buffer);
 #endif
-
-    return true;
 }
 
 static bool
@@ -3298,12 +3330,7 @@ GetBacktrace(JSContext* cx, unsigned argc, Value* vp)
     if (!buf)
         return false;
 
-    RootedString str(cx);
-    if (!(str = JS_NewStringCopyZ(cx, buf.get())))
-        return false;
-
-    args.rval().setString(str);
-    return true;
+    return ReturnStringCopy(cx, args, buf.get());
 }
 
 static bool
@@ -4305,8 +4332,6 @@ GetModuleEnvironment(JSContext* cx, HandleModuleObject module)
     // before they have been instantiated.
     RootedModuleEnvironmentObject env(cx, &module->initialEnvironment());
     MOZ_ASSERT(env);
-    MOZ_ASSERT_IF(module->environment(), module->environment() == env);
-
     return env;
 }
 
@@ -4325,7 +4350,7 @@ GetModuleEnvironmentNames(JSContext* cx, unsigned argc, Value* vp)
     }
 
     RootedModuleObject module(cx, &args[0].toObject().as<ModuleObject>());
-    if (module->status() == MODULE_STATUS_ERRORED) {
+    if (module->hadEvaluationError()) {
         JS_ReportErrorASCII(cx, "Module environment unavailable");
         return false;
     }
@@ -4368,7 +4393,7 @@ GetModuleEnvironmentValue(JSContext* cx, unsigned argc, Value* vp)
     }
 
     RootedModuleObject module(cx, &args[0].toObject().as<ModuleObject>());
-    if (module->status() == MODULE_STATUS_ERRORED) {
+    if (module->hadEvaluationError()) {
         JS_ReportErrorASCII(cx, "Module environment unavailable");
         return false;
     }
@@ -4757,24 +4782,6 @@ DisRegExp(JSContext* cx, unsigned argc, Value* vp)
 #endif // DEBUG
 
 static bool
-EnableForEach(JSContext* cx, unsigned argc, Value* vp)
-{
-    CallArgs args = CallArgsFromVp(argc, vp);
-    JS::ContextOptionsRef(cx).setForEachStatement(true);
-    args.rval().setUndefined();
-    return true;
-}
-
-static bool
-DisableForEach(JSContext* cx, unsigned argc, Value* vp)
-{
-    CallArgs args = CallArgsFromVp(argc, vp);
-    JS::ContextOptionsRef(cx).setForEachStatement(false);
-    args.rval().setUndefined();
-    return true;
-}
-
-static bool
 GetTimeZone(JSContext* cx, unsigned argc, Value* vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
@@ -4813,13 +4820,8 @@ GetTimeZone(JSContext* cx, unsigned argc, Value* vp)
 
     std::time_t now = std::time(nullptr);
     if (now != static_cast<std::time_t>(-1)) {
-        if (const char* tz = getTimeZone(&now)) {
-            JSString* str = JS_NewStringCopyZ(cx, tz);
-            if (!str)
-                return false;
-            args.rval().setString(str);
-            return true;
-        }
+        if (const char* tz = getTimeZone(&now))
+            return ReturnStringCopy(cx, args, tz);
     }
 
     args.rval().setUndefined();
@@ -4956,6 +4958,174 @@ IsLegacyIterator(JSContext* cx, unsigned argc, Value* vp)
         args.rval().setBoolean(false);
     else
         args.rval().setBoolean(IsPropertyIterator(args[0]));
+    return true;
+}
+
+static bool
+SetTimeResolution(JSContext* cx, unsigned argc, Value* vp)
+{
+   CallArgs args = CallArgsFromVp(argc, vp);
+   RootedObject callee(cx, &args.callee());
+
+   if (!args.requireAtLeast(cx, "setTimeResolution", 2))
+        return false;
+
+   if (!args[0].isInt32()) {
+      ReportUsageErrorASCII(cx, callee, "First argument must be an Int32.");
+      return false;
+   }
+   int32_t resolution = args[0].toInt32();
+
+   if (!args[1].isBoolean()) {
+       ReportUsageErrorASCII(cx, callee, "Second argument must be a Boolean");
+       return false;
+   }
+   bool jitter = args[1].toBoolean();
+
+   JS::SetTimeResolutionUsec(resolution, jitter);
+
+   args.rval().setUndefined();
+   return true;
+}
+
+static bool
+EnableExpressionClosures(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+    JS::ContextOptionsRef(cx).setExpressionClosures(true);
+    args.rval().setUndefined();
+    return true;
+}
+
+static bool
+DisableExpressionClosures(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+    JS::ContextOptionsRef(cx).setExpressionClosures(false);
+    args.rval().setUndefined();
+    return true;
+}
+
+JSScript*
+js::TestingFunctionArgumentToScript(JSContext* cx,
+                                    HandleValue v,
+                                    JSFunction** funp /* = nullptr */)
+{
+    if (v.isString()) {
+        // To convert a string to a script, compile it. Parse it as an ES6 Program.
+        RootedLinearString linearStr(cx, StringToLinearString(cx, v.toString()));
+        if (!linearStr)
+            return nullptr;
+        size_t len = GetLinearStringLength(linearStr);
+        AutoStableStringChars linearChars(cx);
+        if (!linearChars.initTwoByte(cx, linearStr))
+            return nullptr;
+        const char16_t* chars = linearChars.twoByteRange().begin().get();
+
+        RootedScript script(cx);
+        CompileOptions options(cx);
+        if (!JS::Compile(cx, options, chars, len, &script))
+            return nullptr;
+        return script;
+    }
+
+    RootedFunction fun(cx, JS_ValueToFunction(cx, v));
+    if (!fun)
+        return nullptr;
+
+    // Unwrap bound functions.
+    while (fun->isBoundFunction()) {
+        JSObject* target = fun->getBoundFunctionTarget();
+        if (target && target->is<JSFunction>())
+            fun = &target->as<JSFunction>();
+        else
+            break;
+    }
+
+    // Get unwrapped async function.
+    if (IsWrappedAsyncFunction(fun))
+        fun = GetUnwrappedAsyncFunction(fun);
+    if (IsWrappedAsyncGenerator(fun))
+        fun = GetUnwrappedAsyncGenerator(fun);
+
+    if (!fun->isInterpreted()) {
+        JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_TESTING_SCRIPTS_ONLY);
+        return nullptr;
+    }
+
+    JSScript* script = JSFunction::getOrCreateScript(cx, fun);
+    if (!script)
+        return nullptr;
+
+    if (funp)
+        *funp = fun;
+
+    return script;
+}
+
+static bool
+BaselineCompile(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+    RootedObject callee(cx, &args.callee());
+
+    RootedScript script(cx);
+    if (args.length() == 0) {
+        NonBuiltinScriptFrameIter iter(cx);
+        if (iter.done()) {
+            ReportUsageErrorASCII(cx, callee, "no script argument and no script caller");
+            return false;
+        }
+        script = iter.script();
+    } else {
+        script = TestingFunctionArgumentToScript(cx, args[0]);
+        if (!script)
+            return false;
+    }
+
+    bool forceDebug = false;
+    if (args.length() > 1) {
+        if (args.length() > 2) {
+            ReportUsageErrorASCII(cx, callee, "too many arguments");
+            return false;
+        }
+        if (!args[1].isBoolean() && !args[1].isUndefined()) {
+            ReportUsageErrorASCII(cx, callee, "forceDebugInstrumentation argument should be boolean");
+            return false;
+        }
+        forceDebug = ToBoolean(args[1]);
+    }
+
+    if (script->hasBaselineScript()) {
+        if (forceDebug && !script->baselineScript()->hasDebugInstrumentation()) {
+            // There isn't an easy way to do this for a script that might be on
+            // stack right now. See js::jit::RecompileOnStackBaselineScriptsForDebugMode.
+            ReportUsageErrorASCII(cx, callee,
+                                  "unsupported case: recompiling script for debug mode");
+            return false;
+        }
+
+        args.rval().setUndefined();
+        return true;
+    }
+
+    if (!jit::IsBaselineEnabled(cx))
+        return ReturnStringCopy(cx, args, "baseline disabled");
+    if (!script->canBaselineCompile())
+        return ReturnStringCopy(cx, args, "can't compile");
+
+    jit::MethodStatus status = jit::BaselineCompile(cx, script, forceDebug);
+    switch (status) {
+      case jit::Method_Error:
+        return false;
+      case jit::Method_CantCompile:
+        return ReturnStringCopy(cx, args, "can't compile");
+      case jit::Method_Skipped:
+        return ReturnStringCopy(cx, args, "skipped");
+      case jit::Method_Compiled:
+        args.rval().setUndefined();
+    }
+
     return true;
 }
 
@@ -5262,6 +5432,10 @@ gc::ZealModeHelpText),
 "wasmIsSupported()",
 "  Returns a boolean indicating whether WebAssembly is supported on the current device."),
 
+    JS_FN_HELP("wasmIsSupportedByHardware", WasmIsSupportedByHardware, 0, 0,
+"wasmIsSupportedByHardware()",
+"  Returns a boolean indicating whether WebAssembly is supported on the current hardware (regardless of whether we've enabled support)."),
+
     JS_FN_HELP("wasmDebuggingIsSupported", WasmDebuggingIsSupported, 0, 0,
 "wasmDebuggingIsSupported()",
 "  Returns a boolean indicating whether WebAssembly debugging is supported on the current device;\n"
@@ -5270,6 +5444,16 @@ gc::ZealModeHelpText),
     JS_FN_HELP("wasmThreadsSupported", WasmThreadsSupported, 0, 0,
 "wasmThreadsSupported()",
 "  Returns a boolean indicating whether the WebAssembly threads proposal is\n"
+"  supported on the current device."),
+
+    JS_FN_HELP("wasmSignExtensionSupported", WasmSignExtensionSupported, 0, 0,
+"wasmSignExtensionSupported()",
+"  Returns a boolean indicating whether the WebAssembly sign extension opcodes are\n"
+"  supported on the current device."),
+
+    JS_FN_HELP("wasmSaturatingTruncationSupported", WasmSaturatingTruncationSupported, 0, 0,
+"wasmSaturatingTruncationSupported()",
+"  Returns a boolean indicating whether the WebAssembly saturating truncates opcodes are\n"
 "  supported on the current device."),
 
     JS_FN_HELP("wasmCompileMode", WasmCompileMode, 0, 0,
@@ -5291,6 +5475,11 @@ gc::ZealModeHelpText),
 "  'stable', 'best', 'baseline', or 'ion'; the default is 'stable'.  If the request\n"
 "  cannot be satisfied then null is returned.  If the request is 'ion' then block\n"
 "  until background compilation is complete."),
+
+    JS_FN_HELP("wasmHasTier2CompilationCompleted", WasmHasTier2CompilationCompleted, 1, 0,
+"wasmHasTier2CompilationCompleted(module)",
+"  Returns a boolean indicating whether a given module has finished compiled code for tier2. \n"
+"This will return true early if compilation isn't two-tiered. "),
 
     JS_FN_HELP("isLazyFunction", IsLazyFunction, 1, 0,
 "isLazyFunction(fun)",
@@ -5354,7 +5543,9 @@ gc::ZealModeHelpText),
 "      to specify whether SharedArrayBuffers may be serialized.\n"
 "    'scope' - SameProcessSameThread, SameProcessDifferentThread, or\n"
 "      DifferentProcess. Determines how some values will be serialized.\n"
-"      Clone buffers may only be deserialized with a compatible scope."),
+"      Clone buffers may only be deserialized with a compatible scope.\n"
+"      NOTE - For DifferentProcess, must also set SharedArrayBuffer:'deny'\n"
+"      if data contains any shared memory object."),
 
     JS_FN_HELP("deserialize", Deserialize, 1, 0,
 "deserialize(clonebuffer[, opts])",
@@ -5373,6 +5564,10 @@ gc::ZealModeHelpText),
     JS_FN_HELP("helperThreadCount", HelperThreadCount, 0, 0,
 "helperThreadCount()",
 "  Returns the number of helper threads available for off-thread tasks."),
+
+    JS_FN_HELP("enableShapeConsistencyChecks", EnableShapeConsistencyChecks, 0, 0,
+"enableShapeConsistencyChecks()",
+"  Enable some slow Shape assertions.\n"),
 
 #ifdef JS_TRACE_LOGGING
     JS_FN_HELP("startTraceLogger", EnableTraceLogger, 0, 0,
@@ -5541,14 +5736,6 @@ gc::ZealModeHelpText),
 "getModuleEnvironmentValue(module, name)",
 "  Get the value of a bound name in a module environment.\n"),
 
-    JS_FN_HELP("enableForEach", EnableForEach, 0, 0,
-"enableForEach()",
-"  Enables the deprecated, non-standard for-each.\n"),
-
-    JS_FN_HELP("disableForEach", DisableForEach, 0, 0,
-"disableForEach()",
-"  Disables the deprecated, non-standard for-each.\n"),
-
 #if defined(FUZZING) && defined(__AFL_COMPILER)
     JS_FN_HELP("aflloop", AflLoop, 1, 0,
 "aflloop(max_cnt)",
@@ -5571,6 +5758,28 @@ gc::ZealModeHelpText),
     JS_FN_HELP("getTimeZone", GetTimeZone, 0, 0,
 "getTimeZone()",
 "  Get the current time zone.\n"),
+
+    JS_FN_HELP("setTimeResolution", SetTimeResolution, 2, 0,
+"setTimeResolution(resolution, jitter)",
+"  Enables time clamping and jittering. Specify a time resolution in\n"
+"  microseconds and whether or not to jitter\n"),
+
+    JS_FN_HELP("enableExpressionClosures", EnableExpressionClosures, 0, 0,
+"enableExpressionClosures()",
+"  Enables the deprecated, non-standard expression closures.\n"),
+
+    JS_FN_HELP("disableExpressionClosures", DisableExpressionClosures, 0, 0,
+"disableExpressionClosures()",
+"  Disables the deprecated, non-standard expression closures.\n"),
+
+    JS_FN_HELP("baselineCompile", BaselineCompile, 2, 0,
+"baselineCompile([fun/code], forceDebugInstrumentation=false)",
+"  Baseline-compiles the given JS function or script.\n"
+"  Without arguments, baseline-compiles the caller's script; but note\n"
+"  that extra boilerplate is needed afterwards to cause the VM to start\n"
+"  running the jitcode rather than staying in the interpreter:\n"
+"    baselineCompile();  for (var i=0; i<1; i++) {} ...\n"
+"  The interpreter will enter the new jitcode at the loop header.\n"),
 
     JS_FS_HELP_END
 };

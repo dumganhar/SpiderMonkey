@@ -16,7 +16,6 @@
 #include "mozilla/TemplateLib.h"
 
 #include "jsapi.h"
-#include "jsatom.h"
 #include "jsfriendapi.h"
 #include "jstypes.h"
 #include "NamespaceImports.h"
@@ -28,10 +27,11 @@
 #include "js/MemoryMetrics.h"
 #include "js/RootingAPI.h"
 #include "js/UbiNode.h"
+#include "vm/JSAtom.h"
 #include "vm/ObjectGroup.h"
 #include "vm/Printer.h"
-#include "vm/String.h"
-#include "vm/Symbol.h"
+#include "vm/StringType.h"
+#include "vm/SymbolType.h"
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -235,6 +235,7 @@ class ShapeTable {
   public:
     friend class NativeObject;
     friend class BaseShape;
+    friend class Shape;
     static const uint32_t MIN_ENTRIES   = 11;
 
     class Entry {
@@ -635,7 +636,7 @@ struct StackBaseShape : public DefaultHasher<ReadBarriered<UnownedBaseShape*>>
         clasp(base->clasp_)
     {}
 
-    inline StackBaseShape(JSContext* cx, const Class* clasp, uint32_t objectFlags);
+    inline StackBaseShape(const Class* clasp, uint32_t objectFlags);
     explicit inline StackBaseShape(Shape* shape);
 
     struct Lookup
@@ -761,7 +762,8 @@ class Shape : public gc::TenuredCell
     template<MaybeAdding Adding = MaybeAdding::NotAdding>
     static inline MOZ_MUST_USE bool search(JSContext* cx, Shape* start, jsid id,
                                            const AutoKeepShapeTables&,
-                                           Shape** pshape, ShapeTable::Entry** pentry);
+                                           Shape** pshape, ShapeTable** ptable,
+                                           ShapeTable::Entry** pentry);
 
     static inline Shape* searchNoHashify(Shape* start, jsid id);
 
@@ -800,6 +802,9 @@ class Shape : public gc::TenuredCell
     bool makeOwnBaseShape(JSContext* cx);
 
     MOZ_ALWAYS_INLINE MOZ_MUST_USE bool maybeCreateTableForLookup(JSContext* cx);
+
+    MOZ_ALWAYS_INLINE void updateDictionaryTable(ShapeTable* table, ShapeTable::Entry* entry,
+                                                 const AutoKeepShapeTables& keep);
 
   public:
     bool hasTable() const { return base()->hasTable(); }
@@ -990,8 +995,6 @@ class Shape : public gc::TenuredCell
         return flags & OVERWRITTEN;
     }
 
-    void update(GetterOp getter, SetterOp setter, uint8_t attrs);
-
     bool matches(const Shape* other) const {
         return propid_.get() == other->propid_.get() &&
                matchesParamsAfterId(other->base(), other->maybeSlot(), other->attrs,
@@ -1147,6 +1150,7 @@ class Shape : public gc::TenuredCell
 
 #ifdef DEBUG
     void dump(js::GenericPrinter& out) const;
+    void dump() const;
     void dumpSubtree(int level, js::GenericPrinter& out) const;
 #endif
 
@@ -1165,14 +1169,19 @@ class Shape : public gc::TenuredCell
     void fixupGetterSetterForBarrier(JSTracer* trc);
     void updateBaseShapeAfterMovingGC();
 
-    /* For JIT usage */
-    static inline size_t offsetOfBase() { return offsetof(Shape, base_); }
+#ifdef DEBUG
+    // For JIT usage.
     static inline size_t offsetOfSlotInfo() { return offsetof(Shape, slotInfo); }
     static inline uint32_t fixedSlotsMask() { return FIXED_SLOTS_MASK; }
+#endif
 
   private:
     void fixupDictionaryShapeAfterMovingGC();
     void fixupShapeTreeAfterMovingGC();
+
+    static Shape* fromParentFieldPointer(uintptr_t p) {
+        return reinterpret_cast<Shape*>(p - offsetof(Shape, parent));
+    }
 
     static void staticAsserts() {
         JS_STATIC_ASSERT(offsetof(Shape, base_) == offsetof(js::shadow::Shape, base));
@@ -1217,7 +1226,7 @@ class MOZ_RAII AutoRooterGetterSetter
         inline Inner(JSContext* cx, uint8_t attrs, GetterOp* pgetter_, SetterOp* psetter_);
 
       private:
-        virtual void trace(JSTracer* trc);
+        virtual void trace(JSTracer* trc) override;
 
         uint8_t attrs;
         GetterOp* pgetter;

@@ -226,7 +226,7 @@ var ignoreFunctions = {
 
     "void js::AutoEnterOOMUnsafeRegion::crash(uint64, int8*)" : true,
 
-    "void mozilla::dom::workers::WorkerPrivate::AssertIsOnWorkerThread() const" : true,
+    "void mozilla::dom::WorkerPrivate::AssertIsOnWorkerThread() const" : true,
 
     // It would be cool to somehow annotate that nsTHashtable<T> will use
     // nsTHashtable<T>::s_MatchEntry for its matchEntry function pointer, but
@@ -332,10 +332,11 @@ function extraRootedPointers()
         // These are not actually rooted, but are only used in the context of
         // AutoKeepAtoms.
         'js::frontend::TokenStream',
-        'js::frontend::TokenStream::Position',
+        'js::frontend::TokenStreamAnyChars',
 
         'mozilla::ErrorResult',
         'mozilla::IgnoredErrorResult',
+        'mozilla::IgnoreErrors',
         'mozilla::dom::binding_detail::FastErrorResult',
     ];
 }

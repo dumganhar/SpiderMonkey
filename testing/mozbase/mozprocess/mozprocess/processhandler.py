@@ -12,8 +12,10 @@ import sys
 import threading
 import time
 import traceback
+
 from Queue import Queue, Empty
 from datetime import datetime
+
 
 __all__ = ['ProcessHandlerMixin', 'ProcessHandler', 'LogOutput',
            'StoreOutput', 'StreamOutput']
@@ -137,20 +139,19 @@ class ProcessHandlerMixin(object):
 
         def kill(self, sig=None):
             if isWin:
-                if not self._ignore_children and self._handle and self._job:
-                    self.debug("calling TerminateJobObject")
-                    winprocess.TerminateJobObject(self._job, winprocess.ERROR_CONTROL_C_EXIT)
-                    self.returncode = winprocess.GetExitCodeProcess(self._handle)
-                elif self._handle:
-                    self.debug("calling TerminateProcess")
-                    try:
+                try:
+                    if not self._ignore_children and self._handle and self._job:
+                        self.debug("calling TerminateJobObject")
+                        winprocess.TerminateJobObject(self._job, winprocess.ERROR_CONTROL_C_EXIT)
+                    elif self._handle:
+                        self.debug("calling TerminateProcess")
                         winprocess.TerminateProcess(self._handle, winprocess.ERROR_CONTROL_C_EXIT)
-                    except:
-                        traceback.print_exc()
-                        raise OSError("Could not terminate process")
-                    finally:
-                        winprocess.GetExitCodeProcess(self._handle)
-                        self._cleanup()
+                except WindowsError:
+                    self._cleanup()
+
+                    traceback.print_exc()
+                    raise OSError("Could not terminate process")
+
             else:
                 def send_sig(sig, retries=0):
                     pid = self.detached_pid or self.pid
@@ -353,7 +354,7 @@ class ProcessHandlerMixin(object):
 
                         # Spin up our thread for managing the IO Completion Port
                         self._procmgrthread = threading.Thread(target=self._procmgr)
-                    except:
+                    except Exception:
                         print("""Exception trying to use job objects;
 falling back to not using job objects for managing child processes""", file=sys.stderr)
                         tb = traceback.format_exc()
@@ -521,7 +522,7 @@ falling back to not using job objects for managing child processes""", file=sys.
                         if item[self.pid] == 'FINISHED':
                             self.debug("received 'FINISHED' from _procmgrthread")
                             self._process_events.task_done()
-                    except:
+                    except Exception:
                         traceback.print_exc()
                         raise OSError("IO Completion Port failed to signal process shutdown")
                     finally:
@@ -672,6 +673,7 @@ falling back to not using job objects for managing child processes""", file=sys.
         self.args = args
         self.cwd = cwd
         self.didTimeout = False
+        self.didOutputTimeout = False
         self._ignore_children = ignore_children
         self.keywordargs = kwargs
         self.read_buffer = ''
@@ -693,6 +695,7 @@ falling back to not using job objects for managing child processes""", file=sys.
 
         def on_timeout():
             self.didTimeout = True
+            self.didOutputTimeout = self.reader.didOutputTimeout
             if kill_on_timeout:
                 self.kill()
         onTimeout.insert(0, on_timeout)
@@ -716,8 +719,13 @@ falling back to not using job objects for managing child processes""", file=sys.
 
     @property
     def timedOut(self):
-        """True if the process has timed out."""
+        """True if the process has timed out for any reason."""
         return self.didTimeout
+
+    @property
+    def outputTimedOut(self):
+        """True if the process has timed out for no output."""
+        return self.didOutputTimeout
 
     @property
     def commandline(self):
@@ -737,6 +745,7 @@ falling back to not using job objects for managing child processes""", file=sys.
         being killed.
         """
         self.didTimeout = False
+        self.didOutputTimeout = False
 
         # default arguments
         args = dict(stdout=subprocess.PIPE,
@@ -848,7 +857,7 @@ falling back to not using job objects for managing child processes""", file=sys.
             while self.reader.is_alive():
                 self.reader.thread.join(timeout=1)
                 count += 1
-                if timeout and count > timeout:
+                if timeout is not None and count > timeout:
                     return None
 
         self.returncode = self.proc.wait()
@@ -863,6 +872,37 @@ falling back to not using job objects for managing child processes""", file=sys.
     @property
     def pid(self):
         return self.proc.pid
+
+    @staticmethod
+    def pid_exists(pid):
+        if pid < 0:
+            return False
+
+        if isWin:
+            try:
+                process = winprocess.OpenProcess(
+                    winprocess.PROCESS_QUERY_INFORMATION | winprocess.PROCESS_VM_READ, False, pid)
+                return winprocess.GetExitCodeProcess(process) == winprocess.STILL_ACTIVE
+
+            except WindowsError as e:
+                # no such process
+                if e.winerror == winprocess.ERROR_INVALID_PARAMETER:
+                    return False
+
+                # access denied
+                if e.winerror == winprocess.ERROR_ACCESS_DENIED:
+                    return True
+
+                # re-raise for any other type of exception
+                raise
+
+        elif isPosix:
+            try:
+                os.kill(pid, 0)
+            except OSError as e:
+                return e.errno == errno.EPERM
+            else:
+                return True
 
     @classmethod
     def _getpgid(cls, pid):
@@ -919,6 +959,7 @@ class ProcessReader(object):
         self.timeout = timeout
         self.output_timeout = output_timeout
         self.thread = None
+        self.didOutputTimeout = False
 
     def _create_stream_reader(self, name, stream, queue, callback):
         thread = threading.Thread(name=name,
@@ -979,6 +1020,7 @@ class ProcessReader(object):
             if not has_line:
                 if output_timeout is not None and now > output_timeout:
                     timed_out = True
+                    self.didOutputTimeout = True
                     break
             else:
                 if output_timeout is not None:

@@ -6,27 +6,24 @@
 
 #include "jit/Recover.h"
 
-
 #include "jsapi.h"
-#include "jscntxt.h"
-#include "jsiter.h"
 #include "jsmath.h"
-#include "jsobj.h"
-#include "jsstr.h"
 
 #include "builtin/RegExp.h"
 #include "builtin/SIMD.h"
+#include "builtin/String.h"
 #include "builtin/TypedObject.h"
-
 #include "gc/Heap.h"
-
 #include "jit/JitSpewer.h"
 #include "jit/JSJitFrameIter.h"
 #include "jit/MIR.h"
 #include "jit/MIRGraph.h"
 #include "jit/VMFunctions.h"
 #include "vm/Interpreter.h"
-#include "vm/String.h"
+#include "vm/Iteration.h"
+#include "vm/JSContext.h"
+#include "vm/JSObject.h"
+#include "vm/StringType.h"
 
 #include "vm/Interpreter-inl.h"
 #include "vm/NativeObject-inl.h"
@@ -958,10 +955,40 @@ RHypot::recover(JSContext* cx, SnapshotIterator& iter) const
 }
 
 bool
+MNearbyInt::writeRecoverData(CompactBufferWriter& writer) const
+{
+    MOZ_ASSERT(canRecoverOnBailout());
+    switch (roundingMode_) {
+      case RoundingMode::Up:
+        writer.writeUnsigned(uint32_t(RInstruction::Recover_Ceil));
+        return true;
+      case RoundingMode::Down:
+        writer.writeUnsigned(uint32_t(RInstruction::Recover_Floor));
+        return true;
+      default:
+        MOZ_CRASH("Unsupported rounding mode.");
+    }
+}
+
+RNearbyInt::RNearbyInt(CompactBufferReader& reader)
+{
+    roundingMode_ = reader.readByte();
+}
+
+bool
+RNearbyInt::recover(JSContext* cx, SnapshotIterator& iter) const
+{
+    MOZ_CRASH("Unsupported rounding mode.");
+}
+
+bool
 MMathFunction::writeRecoverData(CompactBufferWriter& writer) const
 {
     MOZ_ASSERT(canRecoverOnBailout());
     switch (function_) {
+      case Ceil:
+        writer.writeUnsigned(uint32_t(RInstruction::Recover_Ceil));
+        return true;
       case Floor:
         writer.writeUnsigned(uint32_t(RInstruction::Recover_Floor));
         return true;
@@ -1372,6 +1399,35 @@ RNewArray::recover(JSContext* cx, SnapshotIterator& iter) const
 }
 
 bool
+MNewArrayCopyOnWrite::writeRecoverData(CompactBufferWriter& writer) const
+{
+    MOZ_ASSERT(canRecoverOnBailout());
+    writer.writeUnsigned(uint32_t(RInstruction::Recover_NewArrayCopyOnWrite));
+    writer.writeByte(initialHeap());
+    return true;
+}
+
+RNewArrayCopyOnWrite::RNewArrayCopyOnWrite(CompactBufferReader& reader)
+{
+    initialHeap_ = gc::InitialHeap(reader.readByte());
+}
+
+bool
+RNewArrayCopyOnWrite::recover(JSContext* cx, SnapshotIterator& iter) const
+{
+    RootedArrayObject templateObject(cx, &iter.read().toObject().as<ArrayObject>());
+    RootedValue result(cx);
+
+    ArrayObject* resultObject = NewDenseCopyOnWriteArray(cx, templateObject, initialHeap_);
+    if (!resultObject)
+        return false;
+
+    result.setObject(*resultObject);
+    iter.storeInstructionResult(result);
+    return true;
+}
+
+bool
 MNewIterator::writeRecoverData(CompactBufferWriter& writer) const
 {
     MOZ_ASSERT(canRecoverOnBailout());
@@ -1702,16 +1758,33 @@ RArrayState::recover(JSContext* cx, SnapshotIterator& iter) const
     ArrayObject* object = &iter.read().toObject().as<ArrayObject>();
     uint32_t initLength = iter.read().toInt32();
 
-    object->setDenseInitializedLength(initLength);
-    for (size_t index = 0; index < numElements(); index++) {
-        Value val = iter.read();
+    if (!object->denseElementsAreCopyOnWrite()) {
+        MOZ_ASSERT(object->getDenseInitializedLength() == 0,
+                   "initDenseElement call below relies on this");
+        object->setDenseInitializedLength(initLength);
 
-        if (index >= initLength) {
-            MOZ_ASSERT(val.isUndefined());
-            continue;
+        for (size_t index = 0; index < numElements(); index++) {
+            Value val = iter.read();
+
+            if (index >= initLength) {
+                MOZ_ASSERT(val.isUndefined());
+                continue;
+            }
+
+            object->initDenseElement(index, val);
         }
+    } else {
+        MOZ_RELEASE_ASSERT(object->getDenseInitializedLength() == numElements());
+        MOZ_RELEASE_ASSERT(initLength == numElements());
 
-        object->initDenseElement(index, val);
+        for (size_t index = 0; index < numElements(); index++) {
+            Value val = iter.read();
+            if (object->getDenseElement(index) == val)
+                continue;
+            if (!object->maybeCopyElementsForWrite(cx))
+                return false;
+            object->setDenseElement(index, val);
+        }
     }
 
     result.setObject(*object);

@@ -5,11 +5,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "jscompartment.h"
-
 #include "gc/Zone.h"
-
 #include "jsapi-tests/tests.h"
+#include "vm/JSCompartment.h"
 
 JSObject* keyDelegate = nullptr;
 
@@ -237,8 +235,6 @@ JSObject* newDelegate()
 
     /* Create the global object. */
     JS::CompartmentOptions options;
-    options.behaviors().setVersion(JSVERSION_DEFAULT);
-
     JS::RootedObject global(cx, JS_NewGlobalObject(cx, Jsvalify(&delegateClass), nullptr,
                                                    JS::FireOnNewGlobalHook, options));
     if (!global)

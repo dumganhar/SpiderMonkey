@@ -54,7 +54,7 @@ bits
 
    Universal Mac builds do not have this key defined.
 
-   Unkown processor architectures (see ``processor`` below) may not have
+   Unknown processor architectures (see ``processor`` below) may not have
    this key defined.
 
    Optional.
@@ -81,6 +81,13 @@ datareporting
 
 debug
    Whether this is a debug build.
+
+   Values are ``true`` and ``false``.
+
+   Always defined.
+
+devedition
+   Whether this is a devedition build.
 
    Values are ``true`` and ``false``.
 

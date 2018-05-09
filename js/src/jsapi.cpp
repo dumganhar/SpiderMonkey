@@ -16,39 +16,32 @@
 #include "mozilla/Sprintf.h"
 
 #include <ctype.h>
+#ifdef __linux__
+# include <dlfcn.h>
+#endif
 #include <stdarg.h>
 #include <string.h>
 #include <sys/stat.h>
 
 #include "jsarray.h"
-#include "jsatom.h"
 #include "jsbool.h"
-#include "jscntxt.h"
 #include "jsdate.h"
 #include "jsexn.h"
 #include "jsfriendapi.h"
-#include "jsfun.h"
-#include "jsiter.h"
 #include "jsmath.h"
 #include "jsnum.h"
-#include "jsobj.h"
-#include "json.h"
-#include "jsprf.h"
-#include "jsscript.h"
-#include "jsstr.h"
 #include "jstypes.h"
 #include "jsutil.h"
-#include "jsweakmap.h"
-#include "jswrapper.h"
 
 #include "builtin/AtomicsObject.h"
 #include "builtin/Eval.h"
-#include "builtin/Intl.h"
+#include "builtin/JSON.h"
 #include "builtin/MapObject.h"
 #include "builtin/Promise.h"
 #include "builtin/RegExp.h"
 #include "builtin/Stream.h"
-#include "builtin/SymbolObject.h"
+#include "builtin/String.h"
+#include "builtin/Symbol.h"
 #ifdef ENABLE_SIMD
 # include "builtin/SIMD.h"
 #endif
@@ -58,8 +51,11 @@
 #include "frontend/BytecodeCompiler.h"
 #include "frontend/FullParseHandler.h"  // for JS_BufferIsCompileableUnit
 #include "frontend/Parser.h" // for JS_BufferIsCompileableUnit
+#include "gc/FreeOp.h"
 #include "gc/Marking.h"
 #include "gc/Policy.h"
+#include "gc/PublicIterators.h"
+#include "gc/WeakMap.h"
 #include "jit/JitCommon.h"
 #include "js/CharacterEncoding.h"
 #include "js/Conversions.h"
@@ -69,6 +65,9 @@
 #include "js/SliceBudget.h"
 #include "js/StructuredClone.h"
 #include "js/Utility.h"
+#include "js/Wrapper.h"
+#include "util/StringBuffer.h"
+#include "util/Text.h"
 #include "vm/AsyncFunction.h"
 #include "vm/AsyncIteration.h"
 #include "vm/DateObject.h"
@@ -77,40 +76,38 @@
 #include "vm/ErrorObject.h"
 #include "vm/HelperThreads.h"
 #include "vm/Interpreter.h"
+#include "vm/Iteration.h"
+#include "vm/JSAtom.h"
+#include "vm/JSContext.h"
+#include "vm/JSFunction.h"
+#include "vm/JSObject.h"
+#include "vm/JSScript.h"
 #include "vm/RegExpStatics.h"
 #include "vm/Runtime.h"
 #include "vm/SavedStacks.h"
 #include "vm/SelfHosting.h"
 #include "vm/Shape.h"
-#include "vm/String.h"
-#include "vm/StringBuffer.h"
-#include "vm/Symbol.h"
+#include "vm/StringType.h"
+#include "vm/SymbolType.h"
 #include "vm/WrapperObject.h"
 #include "vm/Xdr.h"
 #include "wasm/AsmJS.h"
 #include "wasm/WasmModule.h"
 
-#include "jsatominlines.h"
-#include "jsfuninlines.h"
-#include "jsscriptinlines.h"
-
 #include "vm/Interpreter-inl.h"
+#include "vm/JSAtom-inl.h"
+#include "vm/JSFunction-inl.h"
+#include "vm/JSScript-inl.h"
 #include "vm/NativeObject-inl.h"
 #include "vm/SavedStacks-inl.h"
-#include "vm/String-inl.h"
+#include "vm/StringType-inl.h"
 
 using namespace js;
 using namespace js::gc;
 
 using mozilla::Maybe;
 using mozilla::PodCopy;
-using mozilla::PodZero;
 using mozilla::Some;
-
-using JS::AutoGCRooter;
-using JS::ToInt32;
-using JS::ToInteger;
-using JS::ToUint32;
 
 #ifdef HAVE_VA_LIST_AS_ARRAY
 #define JS_ADDRESSOF_VA_LIST(ap) ((va_list*)(ap))
@@ -591,53 +588,6 @@ JS::SetSingleThreadedExecutionCallbacks(JSContext* cx,
     cx->runtime()->endSingleThreadedExecutionCallback = end;
 }
 
-JS_PUBLIC_API(JSVersion)
-JS_GetVersion(JSContext* cx)
-{
-    return VersionNumber(cx->findVersion());
-}
-
-static const struct v2smap {
-    JSVersion   version;
-    const char* string;
-} v2smap[] = {
-    {JSVERSION_ECMA_3,  "ECMAv3"},
-    {JSVERSION_1_6,     "1.6"},
-    {JSVERSION_1_7,     "1.7"},
-    {JSVERSION_1_8,     "1.8"},
-    {JSVERSION_ECMA_5,  "ECMAv5"},
-    {JSVERSION_DEFAULT, js_default_str},
-    {JSVERSION_DEFAULT, "1.0"},
-    {JSVERSION_DEFAULT, "1.1"},
-    {JSVERSION_DEFAULT, "1.2"},
-    {JSVERSION_DEFAULT, "1.3"},
-    {JSVERSION_DEFAULT, "1.4"},
-    {JSVERSION_DEFAULT, "1.5"},
-    {JSVERSION_UNKNOWN, nullptr},          /* must be last, nullptr is sentinel */
-};
-
-JS_PUBLIC_API(const char*)
-JS_VersionToString(JSVersion version)
-{
-    int i;
-
-    for (i = 0; v2smap[i].string; i++)
-        if (v2smap[i].version == version)
-            return v2smap[i].string;
-    return "unknown";
-}
-
-JS_PUBLIC_API(JSVersion)
-JS_StringToVersion(const char* string)
-{
-    int i;
-
-    for (i = 0; v2smap[i].string; i++)
-        if (strcmp(v2smap[i].string, string) == 0)
-            return v2smap[i].version;
-    return JSVERSION_UNKNOWN;
-}
-
 JS_PUBLIC_API(JS::ContextOptions&)
 JS::ContextOptionsRef(JSContext* cx)
 {
@@ -657,6 +607,11 @@ JS::InitSelfHostedCode(JSContext* cx)
     JSAutoRequest ar(cx);
     if (!rt->initializeAtoms(cx))
         return false;
+
+#ifndef JS_CODEGEN_NONE
+    if (!rt->getJitRuntime(cx))
+        return false;
+#endif
 
     if (!rt->initSelfHosting(cx))
         return false;
@@ -691,6 +646,40 @@ JS_SetCompartmentNameCallback(JSContext* cx, JSCompartmentNameCallback callback)
 {
     cx->runtime()->compartmentNameCallback = callback;
 }
+
+#if defined(NIGHTLY_BUILD)
+JS_PUBLIC_API(void)
+JS_SetErrorInterceptorCallback(JSRuntime* rt, JSErrorInterceptor* callback)
+{
+    rt->errorInterception.interceptor = callback;
+}
+
+JS_PUBLIC_API(JSErrorInterceptor*)
+JS_GetErrorInterceptorCallback(JSRuntime* rt)
+{
+    return rt->errorInterception.interceptor;
+}
+
+JS_PUBLIC_API(Maybe<JSExnType>)
+JS_GetErrorType(const JS::Value& val)
+{
+    // All errors are objects.
+    if (!val.isObject())
+        return mozilla::Nothing();
+
+    const JSObject& obj = val.toObject();
+
+    // All errors are `ErrorObject`.
+    if (!obj.is<js::ErrorObject>()) {
+        // Not one of the primitive errors.
+        return mozilla::Nothing();
+    }
+
+    const js::ErrorObject& err = obj.as<js::ErrorObject>();
+    return mozilla::Some(err.type());
+}
+
+#endif // defined(NIGHTLY_BUILD)
 
 JS_PUBLIC_API(void)
 JS_SetWrapObjectCallbacks(JSContext* cx, const JSWrapObjectCallbacks* callbacks)
@@ -1068,9 +1057,7 @@ static const JSStdName builtin_property_names[] = {
     { EAGER_ATOM(encodeURI), JSProto_String },
     { EAGER_ATOM(decodeURIComponent), JSProto_String },
     { EAGER_ATOM(encodeURIComponent), JSProto_String },
-#if JS_HAS_UNEVAL
     { EAGER_ATOM(uneval), JSProto_String },
-#endif
 
     { 0, JSProto_LIMIT }
 };
@@ -1229,7 +1216,11 @@ JS_GetClassObject(JSContext* cx, JSProtoKey key, MutableHandleObject objp)
 {
     AssertHeapIsIdle();
     CHECK_REQUEST(cx);
-    return GetBuiltinConstructor(cx, key, objp);
+    JSObject* obj = GlobalObject::getOrCreateConstructor(cx, key);
+    if (!obj)
+        return false;
+    objp.set(obj);
+    return true;
 }
 
 JS_PUBLIC_API(bool)
@@ -1237,7 +1228,11 @@ JS_GetClassPrototype(JSContext* cx, JSProtoKey key, MutableHandleObject objp)
 {
     AssertHeapIsIdle();
     CHECK_REQUEST(cx);
-    return GetBuiltinPrototype(cx, key, objp);
+    JSObject* proto = GlobalObject::getOrCreatePrototype(cx, key);
+    if (!proto)
+        return false;
+    objp.set(proto);
+    return true;
 }
 
 namespace JS {
@@ -3983,14 +3978,12 @@ void
 JS::TransitiveCompileOptions::copyPODTransitiveOptions(const TransitiveCompileOptions& rhs)
 {
     mutedErrors_ = rhs.mutedErrors_;
-    version = rhs.version;
-    versionSet = rhs.versionSet;
     utf8 = rhs.utf8;
     selfHostingMode = rhs.selfHostingMode;
     canLazilyParse = rhs.canLazilyParse;
     strictOption = rhs.strictOption;
     extraWarningsOption = rhs.extraWarningsOption;
-    forEachStatementOption = rhs.forEachStatementOption;
+    expressionClosuresOption = rhs.expressionClosuresOption;
     werrorOption = rhs.werrorOption;
     asmJSOption = rhs.asmJSOption;
     throwOnAsmJSValidationFailureOption = rhs.throwOnAsmJSValidationFailureOption;
@@ -4001,6 +3994,7 @@ JS::TransitiveCompileOptions::copyPODTransitiveOptions(const TransitiveCompileOp
     introductionOffset = rhs.introductionOffset;
     hasIntroductionInfo = rhs.hasIntroductionInfo;
     isProbablySystemOrAddonCode = rhs.isProbablySystemOrAddonCode;
+    hideScriptFromDebugger = rhs.hideScriptFromDebugger;
 };
 
 void
@@ -4012,6 +4006,7 @@ JS::ReadOnlyCompileOptions::copyPODOptions(const ReadOnlyCompileOptions& rhs)
     scriptSourceOffset = rhs.scriptSourceOffset;
     isRunOnce = rhs.isRunOnce;
     noScriptRval = rhs.noScriptRval;
+    nonSyntacticScope = rhs.nonSyntacticScope;
 }
 
 JS::OwningCompileOptions::OwningCompileOptions(JSContext* cx)
@@ -4105,15 +4100,13 @@ JS::OwningCompileOptions::setIntroducerFilename(JSContext* cx, const char* s)
     return true;
 }
 
-JS::CompileOptions::CompileOptions(JSContext* cx, JSVersion version)
+JS::CompileOptions::CompileOptions(JSContext* cx)
     : ReadOnlyCompileOptions(), elementRoot(cx), elementAttributeNameRoot(cx),
       introductionScriptRoot(cx)
 {
-    this->version = (version != JSVERSION_UNKNOWN) ? version : cx->findVersion();
-
     strictOption = cx->options().strictMode();
     extraWarningsOption = cx->compartment()->behaviors().extraWarnings(cx);
-    forEachStatementOption = cx->options().forEachStatement();
+    expressionClosuresOption = cx->options().expressionClosures();
     isProbablySystemOrAddonCode = cx->compartment()->isProbablySystemOrAddonCode();
     werrorOption = cx->options().werror();
     if (!cx->options().asmJS())
@@ -4126,10 +4119,11 @@ JS::CompileOptions::CompileOptions(JSContext* cx, JSVersion version)
 }
 
 static bool
-Compile(JSContext* cx, const ReadOnlyCompileOptions& options, ScopeKind scopeKind,
+Compile(JSContext* cx, const ReadOnlyCompileOptions& options,
         SourceBufferHolder& srcBuf, MutableHandleScript script)
 {
-    MOZ_ASSERT(scopeKind == ScopeKind::Global || scopeKind == ScopeKind::NonSyntactic);
+    ScopeKind scopeKind = options.nonSyntacticScope ? ScopeKind::NonSyntactic : ScopeKind::Global;
+
     MOZ_ASSERT(!cx->runtime()->isAtomsCompartment(cx->compartment()));
     AssertHeapIsIdle();
     CHECK_REQUEST(cx);
@@ -4139,15 +4133,15 @@ Compile(JSContext* cx, const ReadOnlyCompileOptions& options, ScopeKind scopeKin
 }
 
 static bool
-Compile(JSContext* cx, const ReadOnlyCompileOptions& options, ScopeKind scopeKind,
+Compile(JSContext* cx, const ReadOnlyCompileOptions& options,
         const char16_t* chars, size_t length, MutableHandleScript script)
 {
     SourceBufferHolder srcBuf(chars, length, SourceBufferHolder::NoOwnership);
-    return ::Compile(cx, options, scopeKind, srcBuf, script);
+    return ::Compile(cx, options, srcBuf, script);
 }
 
 static bool
-Compile(JSContext* cx, const ReadOnlyCompileOptions& options, ScopeKind scopeKind,
+Compile(JSContext* cx, const ReadOnlyCompileOptions& options,
         const char* bytes, size_t length, MutableHandleScript script)
 {
     UniqueTwoByteChars chars;
@@ -4158,22 +4152,22 @@ Compile(JSContext* cx, const ReadOnlyCompileOptions& options, ScopeKind scopeKin
     if (!chars)
         return false;
 
-    return ::Compile(cx, options, scopeKind, chars.get(), length, script);
+    return ::Compile(cx, options, chars.get(), length, script);
 }
 
 static bool
-Compile(JSContext* cx, const ReadOnlyCompileOptions& options, ScopeKind scopeKind,
+Compile(JSContext* cx, const ReadOnlyCompileOptions& options,
         FILE* fp, MutableHandleScript script)
 {
     FileContents buffer(cx);
     if (!ReadCompleteFile(cx, fp, buffer))
         return false;
 
-    return ::Compile(cx, options, scopeKind, buffer.begin(), buffer.length(), script);
+    return ::Compile(cx, options, buffer.begin(), buffer.length(), script);
 }
 
 static bool
-Compile(JSContext* cx, const ReadOnlyCompileOptions& optionsArg, ScopeKind scopeKind,
+Compile(JSContext* cx, const ReadOnlyCompileOptions& optionsArg,
         const char* filename, MutableHandleScript script)
 {
     AutoFile file;
@@ -4181,78 +4175,88 @@ Compile(JSContext* cx, const ReadOnlyCompileOptions& optionsArg, ScopeKind scope
         return false;
     CompileOptions options(cx, optionsArg);
     options.setFileAndLine(filename, 1);
-    return ::Compile(cx, options, scopeKind, file.fp(), script);
+    return ::Compile(cx, options, file.fp(), script);
 }
 
 bool
 JS::Compile(JSContext* cx, const ReadOnlyCompileOptions& options,
             SourceBufferHolder& srcBuf, JS::MutableHandleScript script)
 {
-    return ::Compile(cx, options, ScopeKind::Global, srcBuf, script);
+    return ::Compile(cx, options, srcBuf, script);
 }
 
 bool
 JS::Compile(JSContext* cx, const ReadOnlyCompileOptions& options,
             const char* bytes, size_t length, JS::MutableHandleScript script)
 {
-    return ::Compile(cx, options, ScopeKind::Global, bytes, length, script);
+    return ::Compile(cx, options, bytes, length, script);
 }
 
 bool
 JS::Compile(JSContext* cx, const ReadOnlyCompileOptions& options,
             const char16_t* chars, size_t length, JS::MutableHandleScript script)
 {
-    return ::Compile(cx, options, ScopeKind::Global, chars, length, script);
+    return ::Compile(cx, options, chars, length, script);
 }
 
 bool
 JS::Compile(JSContext* cx, const ReadOnlyCompileOptions& options,
             FILE* file, JS::MutableHandleScript script)
 {
-    return ::Compile(cx, options, ScopeKind::Global, file, script);
+    return ::Compile(cx, options, file, script);
 }
 
 bool
 JS::Compile(JSContext* cx, const ReadOnlyCompileOptions& options,
             const char* filename, JS::MutableHandleScript script)
 {
-    return ::Compile(cx, options, ScopeKind::Global, filename, script);
+    return ::Compile(cx, options, filename, script);
 }
 
 bool
-JS::CompileForNonSyntacticScope(JSContext* cx, const ReadOnlyCompileOptions& options,
+JS::CompileForNonSyntacticScope(JSContext* cx, const ReadOnlyCompileOptions& optionsArg,
                                 SourceBufferHolder& srcBuf, JS::MutableHandleScript script)
 {
-    return ::Compile(cx, options, ScopeKind::NonSyntactic, srcBuf, script);
+    CompileOptions options(cx, optionsArg);
+    options.setNonSyntacticScope(true);
+    return ::Compile(cx, options, srcBuf, script);
 }
 
 bool
-JS::CompileForNonSyntacticScope(JSContext* cx, const ReadOnlyCompileOptions& options,
+JS::CompileForNonSyntacticScope(JSContext* cx, const ReadOnlyCompileOptions& optionsArg,
                                 const char* bytes, size_t length, JS::MutableHandleScript script)
 {
-    return ::Compile(cx, options, ScopeKind::NonSyntactic, bytes, length, script);
+    CompileOptions options(cx, optionsArg);
+    options.setNonSyntacticScope(true);
+    return ::Compile(cx, options, bytes, length, script);
 }
 
 bool
-JS::CompileForNonSyntacticScope(JSContext* cx, const ReadOnlyCompileOptions& options,
+JS::CompileForNonSyntacticScope(JSContext* cx, const ReadOnlyCompileOptions& optionsArg,
                                 const char16_t* chars, size_t length,
                                 JS::MutableHandleScript script)
 {
-    return ::Compile(cx, options, ScopeKind::NonSyntactic, chars, length, script);
+    CompileOptions options(cx, optionsArg);
+    options.setNonSyntacticScope(true);
+    return ::Compile(cx, options, chars, length, script);
 }
 
 bool
-JS::CompileForNonSyntacticScope(JSContext* cx, const ReadOnlyCompileOptions& options,
+JS::CompileForNonSyntacticScope(JSContext* cx, const ReadOnlyCompileOptions& optionsArg,
                                 FILE* file, JS::MutableHandleScript script)
 {
-    return ::Compile(cx, options, ScopeKind::NonSyntactic, file, script);
+    CompileOptions options(cx, optionsArg);
+    options.setNonSyntacticScope(true);
+    return ::Compile(cx, options, file, script);
 }
 
 bool
-JS::CompileForNonSyntacticScope(JSContext* cx, const ReadOnlyCompileOptions& options,
+JS::CompileForNonSyntacticScope(JSContext* cx, const ReadOnlyCompileOptions& optionsArg,
                                 const char* filename, JS::MutableHandleScript script)
 {
-    return ::Compile(cx, options, ScopeKind::NonSyntactic, filename, script);
+    CompileOptions options(cx, optionsArg);
+    options.setNonSyntacticScope(true);
+    return ::Compile(cx, options, filename, script);
 }
 
 enum class OffThread {
@@ -4420,14 +4424,14 @@ JS_PUBLIC_API(bool)
 JS_CompileScript(JSContext* cx, const char* ascii, size_t length,
                  const JS::CompileOptions& options, MutableHandleScript script)
 {
-    return Compile(cx, options, ascii, length, script);
+    return ::Compile(cx, options, ascii, length, script);
 }
 
 JS_PUBLIC_API(bool)
 JS_CompileUCScript(JSContext* cx, const char16_t* chars, size_t length,
                    const JS::CompileOptions& options, MutableHandleScript script)
 {
-    return Compile(cx, options, chars, length, script);
+    return ::Compile(cx, options, chars, length, script);
 }
 
 JS_PUBLIC_API(bool)
@@ -4665,6 +4669,28 @@ JS::CompileFunction(JSContext* cx, AutoObjectVector& envChain,
                            chars.get(), length, fun);
 }
 
+JS_PUBLIC_API(bool)
+JS::InitScriptSourceElement(JSContext* cx, HandleScript script,
+                            HandleObject element, HandleString elementAttrName)
+{
+    MOZ_ASSERT(cx);
+    MOZ_ASSERT(CurrentThreadCanAccessRuntime(cx->runtime()));
+
+    RootedScriptSource sso(cx, &script->sourceObject()->as<ScriptSourceObject>());
+    return ScriptSourceObject::initElementProperties(cx, sso, element, elementAttrName);
+}
+
+JS_PUBLIC_API(void)
+JS::ExposeScriptToDebugger(JSContext* cx, HandleScript script)
+{
+    MOZ_ASSERT(cx);
+    MOZ_ASSERT(CurrentThreadCanAccessRuntime(cx->runtime()));
+
+    MOZ_ASSERT(script->hideScriptFromDebugger());
+    script->clearHideScriptFromDebugger();
+    Debugger::onNewScript(cx, script);
+}
+
 JS_PUBLIC_API(JSString*)
 JS_DecompileScript(JSContext* cx, HandleScript script)
 {
@@ -4801,8 +4827,6 @@ Evaluate(JSContext* cx, ScopeKind scopeKind, HandleObject env,
                                                           scopeKind, options, srcBuf));
     if (!script)
         return false;
-
-    MOZ_ASSERT(script->getVersion() == options.version);
 
     bool result = Execute(cx, script, *env,
                           options.noScriptRval ? nullptr : rval.address());
@@ -4993,18 +5017,11 @@ JS::GetRequestedModuleSourcePos(JSContext* cx, JS::HandleValue value,
     *columnNumber = requested.columnNumber();
 }
 
-JS_PUBLIC_API(bool)
-JS::IsModuleErrored(JSObject* moduleArg)
+JS_PUBLIC_API(JSScript*)
+JS::GetModuleScript(JS::HandleObject moduleRecord)
 {
     AssertHeapIsIdle();
-    return moduleArg->as<ModuleObject>().status() == MODULE_STATUS_ERRORED;
-}
-
-JS_PUBLIC_API(JS::Value)
-JS::GetModuleError(JSObject* moduleArg)
-{
-    AssertHeapIsIdle();
-    return moduleArg->as<ModuleObject>().error();
+    return moduleRecord->as<ModuleObject>().script();
 }
 
 JS_PUBLIC_API(JSObject*)
@@ -5849,6 +5866,14 @@ JS_AtomizeAndPinStringN(JSContext* cx, const char* s, size_t length)
 }
 
 JS_PUBLIC_API(JSString*)
+JS_NewLatin1String(JSContext* cx, JS::Latin1Char* chars, size_t length)
+{
+    AssertHeapIsIdle();
+    CHECK_REQUEST(cx);
+    return NewString<CanGC>(cx, chars, length);
+}
+
+JS_PUBLIC_API(JSString*)
 JS_NewUCString(JSContext* cx, char16_t* chars, size_t length)
 {
     AssertHeapIsIdle();
@@ -6661,14 +6686,13 @@ JS_NewRegExpObject(JSContext* cx, const char* bytes, size_t length, unsigned fla
 {
     AssertHeapIsIdle();
     CHECK_REQUEST(cx);
+
     ScopedJSFreePtr<char16_t> chars(InflateString(cx, bytes, length));
     if (!chars)
         return nullptr;
 
-    RegExpObject* reobj = RegExpObject::create(cx, chars, length, RegExpFlag(flags),
-                                               nullptr, nullptr, cx->tempLifoAlloc(),
-                                               GenericObject);
-    return reobj;
+    return RegExpObject::create(cx, chars.get(), length, RegExpFlag(flags), cx->tempLifoAlloc(),
+                                GenericObject);
 }
 
 JS_PUBLIC_API(JSObject*)
@@ -6676,8 +6700,8 @@ JS_NewUCRegExpObject(JSContext* cx, const char16_t* chars, size_t length, unsign
 {
     AssertHeapIsIdle();
     CHECK_REQUEST(cx);
-    return RegExpObject::create(cx, chars, length, RegExpFlag(flags),
-                                nullptr, nullptr, cx->tempLifoAlloc(),
+
+    return RegExpObject::create(cx, chars, length, RegExpFlag(flags), cx->tempLifoAlloc(),
                                 GenericObject);
 }
 
@@ -6693,7 +6717,7 @@ JS_SetRegExpInput(JSContext* cx, HandleObject obj, HandleString input)
     if (!res)
         return false;
 
-    res->reset(cx, input);
+    res->reset(input);
     return true;
 }
 
@@ -7251,14 +7275,32 @@ JS_SetGlobalJitCompilerOption(JSContext* cx, JSJitCompilerOption opt, uint32_t v
       case JSJITCOMPILER_SIMULATOR_ALWAYS_INTERRUPT:
         jit::JitOptions.simulatorAlwaysInterrupt = !!value;
         break;
+      case JSJITCOMPILER_SPECTRE_INDEX_MASKING:
+        jit::JitOptions.spectreIndexMasking = !!value;
+        break;
+      case JSJITCOMPILER_SPECTRE_OBJECT_MITIGATIONS_BARRIERS:
+        jit::JitOptions.spectreObjectMitigationsBarriers = !!value;
+        break;
+      case JSJITCOMPILER_SPECTRE_OBJECT_MITIGATIONS_MISC:
+        jit::JitOptions.spectreObjectMitigationsMisc = !!value;
+        break;
+      case JSJITCOMPILER_SPECTRE_STRING_MITIGATIONS:
+        jit::JitOptions.spectreStringMitigations = !!value;
+        break;
+      case JSJITCOMPILER_SPECTRE_VALUE_MASKING:
+        jit::JitOptions.spectreValueMasking = !!value;
+        break;
+      case JSJITCOMPILER_SPECTRE_JIT_TO_CXX_CALLS:
+        jit::JitOptions.spectreJitToCxxCalls = !!value;
+        break;
       case JSJITCOMPILER_ASMJS_ATOMICS_ENABLE:
         jit::JitOptions.asmJSAtomicsEnable = !!value;
         break;
-      case JSJITCOMPILER_WASM_TEST_MODE:
-        jit::JitOptions.wasmTestMode = !!value;
-        break;
       case JSJITCOMPILER_WASM_FOLD_OFFSETS:
         jit::JitOptions.wasmFoldOffsets = !!value;
+        break;
+      case JSJITCOMPILER_WASM_DELAY_TIER2:
+        jit::JitOptions.wasmDelayTier2 = !!value;
         break;
       case JSJITCOMPILER_ION_INTERRUPT_WITHOUT_SIGNAL:
         jit::JitOptions.ionInterruptWithoutSignals = !!value;
@@ -7284,9 +7326,8 @@ JS_GetGlobalJitCompilerOption(JSContext* cx, JSJitCompilerOption opt, uint32_t* 
         *valueOut = jit::JitOptions.baselineWarmUpThreshold;
         break;
       case JSJITCOMPILER_ION_WARMUP_TRIGGER:
-        *valueOut = jit::JitOptions.forcedDefaultIonWarmUpThreshold.isSome()
-                  ? jit::JitOptions.forcedDefaultIonWarmUpThreshold.ref()
-                  : jit::OptimizationInfo::CompilerWarmupThreshold;
+        *valueOut = jit::JitOptions.forcedDefaultIonWarmUpThreshold
+            .valueOr(jit::OptimizationInfo::CompilerWarmupThreshold);
         break;
       case JSJITCOMPILER_ION_FORCE_IC:
         *valueOut = jit::JitOptions.forceInlineCaches;
@@ -7305,9 +7346,6 @@ JS_GetGlobalJitCompilerOption(JSContext* cx, JSJitCompilerOption opt, uint32_t* 
         break;
       case JSJITCOMPILER_ASMJS_ATOMICS_ENABLE:
         *valueOut = jit::JitOptions.asmJSAtomicsEnable ? 1 : 0;
-        break;
-      case JSJITCOMPILER_WASM_TEST_MODE:
-        *valueOut = jit::JitOptions.wasmTestMode ? 1 : 0;
         break;
       case JSJITCOMPILER_WASM_FOLD_OFFSETS:
         *valueOut = jit::JitOptions.wasmFoldOffsets ? 1 : 0;
@@ -7333,7 +7371,7 @@ JS_GetGlobalJitCompilerOption(JSContext* cx, JSJitCompilerOption opt, uint32_t* 
 
 #if !defined(STATIC_EXPORTABLE_JS_API) && !defined(STATIC_JS_API) && defined(XP_WIN)
 
-#include "jswin.h"
+#include "util/Windows.h"
 
 /*
  * Initialization routine for the JS DLL.
@@ -7726,7 +7764,7 @@ JS::CaptureCurrentStack(JSContext* cx, JS::MutableHandleObject stackp,
 JS_PUBLIC_API(bool)
 JS::CopyAsyncStack(JSContext* cx, JS::HandleObject asyncStack,
                    JS::HandleString asyncCause, JS::MutableHandleObject stackp,
-                   unsigned maxFrameCount)
+                   const Maybe<size_t>& maxFrameCount)
 {
     AssertHeapIsIdle();
     CHECK_REQUEST(cx);
@@ -7748,6 +7786,13 @@ JS::GetObjectZone(JSObject* obj)
     return obj->zone();
 }
 
+JS_PUBLIC_API(Zone*)
+JS::GetNurseryStringZone(JSString* str)
+{
+    MOZ_ASSERT(!str->isTenured());
+    return str->zone();
+}
+
 JS_PUBLIC_API(JS::TraceKind)
 JS::GCThingTraceKind(void* thing)
 {
@@ -7766,3 +7811,17 @@ js::GetStackFormat(JSContext* cx)
 {
     return cx->runtime()->stackFormat();
 }
+
+namespace js {
+
+JS_PUBLIC_API(void)
+NoteIntentionalCrash()
+{
+#ifdef __linux__
+    static bool* addr = reinterpret_cast<bool*>(dlsym(RTLD_DEFAULT, "gBreakpadInjectorEnabled"));
+    if (addr)
+        *addr = false;
+#endif
+}
+
+} // namespace js

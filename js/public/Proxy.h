@@ -385,6 +385,10 @@ struct ProxyReservedSlots
 
     static inline int offsetOfPrivateSlot();
 
+    static inline int offsetOfSlot(size_t slot) {
+        return offsetof(ProxyReservedSlots, slots[0]) + slot * sizeof(Value);
+    }
+
     void init(size_t nreserved) {
         for (size_t i = 0; i < nreserved; i++)
             slots[i] = JS::UndefinedValue();
@@ -499,6 +503,8 @@ inline void
 SetProxyReservedSlot(JSObject* obj, size_t n, const Value& extra)
 {
     MOZ_ASSERT(n < JSCLASS_RESERVED_SLOTS(GetObjectClass(obj)));
+    MOZ_ASSERT_IF(gc::detail::ObjectIsMarkedBlack(obj), JS::ValueIsNotGray(extra));
+
     Value* vp = &detail::GetProxyDataLayout(obj)->reservedSlots->slots[n];
 
     // Trigger a barrier before writing the slot.
@@ -511,6 +517,8 @@ SetProxyReservedSlot(JSObject* obj, size_t n, const Value& extra)
 inline void
 SetProxyPrivate(JSObject* obj, const Value& value)
 {
+    MOZ_ASSERT_IF(gc::detail::ObjectIsMarkedBlack(obj), JS::ValueIsNotGray(value));
+
     Value* vp = &detail::GetProxyDataLayout(obj)->values()->privateSlot;
 
     // Trigger a barrier before writing the slot.

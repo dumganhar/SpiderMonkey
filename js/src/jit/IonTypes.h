@@ -14,9 +14,8 @@
 #include "jsfriendapi.h"
 #include "jstypes.h"
 
-#include "js/GCAPI.h"
 #include "js/Value.h"
-#include "vm/String.h"
+#include "vm/StringType.h"
 
 namespace js {
 namespace jit {
@@ -392,6 +391,22 @@ class SimdConstant {
     }
 };
 
+enum class IntConversionBehavior {
+    // These two try to convert the input to an int32 using ToNumber and
+    // will fail if the resulting int32 isn't strictly equal to the input.
+    Normal,
+    NegativeZeroCheck,
+    // These two will convert the input to an int32 with loss of precision.
+    Truncate,
+    ClampToUint8,
+};
+
+enum class IntConversionInputKind {
+    NumbersOnly,
+    NumbersOrBoolsOnly,
+    Any
+};
+
 // The ordering of this enumeration is important: Anything < Value is a
 // specialized type. Furthermore, anything < String has trivial conversion to
 // a number.
@@ -539,6 +554,23 @@ static inline JSValueTag
 MIRTypeToTag(MIRType type)
 {
     return JSVAL_TYPE_TO_TAG(ValueTypeFromMIRType(type));
+}
+
+static inline size_t
+MIRTypeToSize(MIRType type)
+{
+    switch (type) {
+      case MIRType::Int32:
+        return 4;
+      case MIRType::Int64:
+        return 8;
+      case MIRType::Float32:
+        return 4;
+      case MIRType::Double:
+        return 8;
+      default:
+        MOZ_CRASH("MIRTypeToSize - unhandled case");
+    }
 }
 
 static inline const char*
@@ -852,7 +884,19 @@ enum ABIFunctionType
         (ArgType_General << (ArgType_Shift * 1)) |
         (ArgType_General << (ArgType_Shift * 2)) |
         (ArgType_Double  << (ArgType_Shift * 3)) |
-        (ArgType_General << (ArgType_Shift * 4))
+        (ArgType_General << (ArgType_Shift * 4)),
+
+    Args_Int_GeneralGeneralGeneralInt64 = Args_General0 |
+        (ArgType_General << (ArgType_Shift * 1)) |
+        (ArgType_General << (ArgType_Shift * 2)) |
+        (ArgType_General << (ArgType_Shift * 3)) |
+        (ArgType_Int64 << (ArgType_Shift * 4)),
+
+    Args_Int_GeneralGeneralInt64Int64 = Args_General0 |
+        (ArgType_General << (ArgType_Shift * 1)) |
+        (ArgType_General << (ArgType_Shift * 2)) |
+        (ArgType_Int64 << (ArgType_Shift * 3)) |
+        (ArgType_Int64 << (ArgType_Shift * 4))
 };
 
 enum class BarrierKind : uint32_t {
@@ -877,6 +921,16 @@ enum class RoundingMode {
     NearestTiesToEven,
     TowardsZero
 };
+
+// If a function contains no calls, we can assume the caller has checked the
+// stack limit up to this maximum frame size. This works because the jit stack
+// limit has a generous buffer before the real end of the native stack.
+static const uint32_t MAX_UNCHECKED_LEAF_FRAME_SIZE = 64;
+
+// Truncating conversion modifiers.
+typedef uint32_t TruncFlags;
+static const TruncFlags TRUNC_UNSIGNED   = TruncFlags(1) << 0;
+static const TruncFlags TRUNC_SATURATING = TruncFlags(1) << 1;
 
 } // namespace jit
 } // namespace js

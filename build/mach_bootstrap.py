@@ -46,7 +46,6 @@ MACH_MODULES = [
     'python/mozbuild/mozbuild/backend/mach_commands.py',
     'python/mozbuild/mozbuild/compilation/codecomplete.py',
     'python/mozbuild/mozbuild/frontend/mach_commands.py',
-    'services/common/tests/mach_commands.py',
     'taskcluster/mach_commands.py',
     'testing/awsy/mach_commands.py',
     'testing/firefox-ui/mach_commands.py',
@@ -127,7 +126,7 @@ def search_path(mozilla_dir, packages_txt):
             try:
                 for path in handle_package(package[1:]):
                     yield path
-            except:
+            except Exception:
                 pass
 
         if package[0] == 'packages.txt':

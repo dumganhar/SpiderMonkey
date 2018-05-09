@@ -118,7 +118,7 @@ AnalyzeLsh(TempAllocator& alloc, MLsh* lsh)
 //
 // This is possible when the AddI is only used by the LoadUnboxedScalar opcode.
 static void
-AnalyzeLoadUnboxedScalar(TempAllocator& alloc, MLoadUnboxedScalar* load)
+AnalyzeLoadUnboxedScalar(MLoadUnboxedScalar* load)
 {
     if (load->isRecoveredOnBailout())
         return;
@@ -262,14 +262,14 @@ EffectiveAddressAnalysis::analyze()
             if (!graph_.alloc().ensureBallast())
                 return false;
 
-            // Note that we don't check for MAsmJSCompareExchangeHeap
-            // or MAsmJSAtomicBinopHeap, because the backend and the OOB
+            // Note that we don't check for MWasmCompareExchangeHeap
+            // or MWasmAtomicBinopHeap, because the backend and the OOB
             // mechanism don't support non-zero offsets for them yet
             // (TODO bug 1254935).
             if (i->isLsh())
                 AnalyzeLsh(graph_.alloc(), i->toLsh());
             else if (i->isLoadUnboxedScalar())
-                AnalyzeLoadUnboxedScalar(graph_.alloc(), i->toLoadUnboxedScalar());
+                AnalyzeLoadUnboxedScalar(i->toLoadUnboxedScalar());
             else if (i->isAsmJSLoadHeap())
                 analyzeAsmJSHeapAccess(i->toAsmJSLoadHeap());
             else if (i->isAsmJSStoreHeap())

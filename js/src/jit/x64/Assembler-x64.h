@@ -195,6 +195,10 @@ static constexpr Register ABINonArgReg0 = rax;
 static constexpr Register ABINonArgReg1 = rbx;
 static constexpr Register ABINonArgReg2 = r10;
 
+// This register may be volatile or nonvolatile. Avoid xmm15 which is the
+// ScratchDoubleReg.
+static constexpr FloatRegister ABINonArgDoubleReg = FloatRegister(X86Encoding::xmm8, FloatRegisters::Double);
+
 // These registers may be volatile or nonvolatile.
 // Note: these three registers are all guaranteed to be different
 static constexpr Register ABINonArgReturnReg0 = r10;
@@ -462,16 +466,63 @@ class Assembler : public AssemblerX86Shared
         masm.movq_rr(src.encoding(), dest.encoding());
     }
 
-    void cmovzq(const Operand& src, Register dest) {
+    void cmovCCq(Condition cond, const Operand& src, Register dest) {
+        X86Encoding::Condition cc = static_cast<X86Encoding::Condition>(cond);
         switch (src.kind()) {
           case Operand::REG:
-            masm.cmovzq_rr(src.reg(), dest.encoding());
+            masm.cmovCCq_rr(cc, src.reg(), dest.encoding());
             break;
           case Operand::MEM_REG_DISP:
-            masm.cmovzq_mr(src.disp(), src.base(), dest.encoding());
+            masm.cmovCCq_mr(cc, src.disp(), src.base(), dest.encoding());
             break;
           case Operand::MEM_SCALE:
-            masm.cmovzq_mr(src.disp(), src.base(), src.index(), src.scale(), dest.encoding());
+            masm.cmovCCq_mr(cc, src.disp(), src.base(), src.index(), src.scale(), dest.encoding());
+            break;
+          default:
+            MOZ_CRASH("unexpected operand kind");
+        }
+    }
+    void cmovzq(const Operand& src, Register dest) {
+        cmovCCq(Condition::Zero, src, dest);
+    }
+    void cmovnzq(const Operand& src, Register dest) {
+        cmovCCq(Condition::NonZero, src, dest);
+    }
+
+    template<typename T>
+    void lock_addq(T src, const Operand& op) {
+        masm.prefix_lock();
+        addq(src, op);
+    }
+    template<typename T>
+    void lock_subq(T src, const Operand& op) {
+        masm.prefix_lock();
+        subq(src, op);
+    }
+    template<typename T>
+    void lock_andq(T src, const Operand& op) {
+        masm.prefix_lock();
+        andq(src, op);
+    }
+    template<typename T>
+    void lock_orq(T src, const Operand& op) {
+        masm.prefix_lock();
+        orq(src, op);
+    }
+    template<typename T>
+    void lock_xorq(T src, const Operand& op) {
+        masm.prefix_lock();
+        xorq(src, op);
+    }
+
+    void lock_cmpxchgq(Register src, const Operand& mem) {
+        masm.prefix_lock();
+        switch (mem.kind()) {
+          case Operand::MEM_REG_DISP:
+            masm.cmpxchgq(src.encoding(), mem.disp(), mem.base());
+            break;
+          case Operand::MEM_SCALE:
+            masm.cmpxchgq(src.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
             break;
           default:
             MOZ_CRASH("unexpected operand kind");
@@ -480,6 +531,32 @@ class Assembler : public AssemblerX86Shared
 
     void xchgq(Register src, Register dest) {
         masm.xchgq_rr(src.encoding(), dest.encoding());
+    }
+
+    void xchgq(Register src, const Operand& mem) {
+        switch (mem.kind()) {
+          case Operand::MEM_REG_DISP:
+            masm.xchgq_rm(src.encoding(), mem.disp(), mem.base());
+            break;
+          case Operand::MEM_SCALE:
+            masm.xchgq_rm(src.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
+            break;
+          default:
+            MOZ_CRASH("unexpected operand kind");
+        }
+    }
+
+    void lock_xaddq(Register srcdest, const Operand& mem) {
+        switch (mem.kind()) {
+          case Operand::MEM_REG_DISP:
+            masm.lock_xaddq_rm(srcdest.encoding(), mem.disp(), mem.base());
+            break;
+          case Operand::MEM_SCALE:
+            masm.lock_xaddq_rm(srcdest.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
+            break;
+          default:
+            MOZ_CRASH("unexpected operand kind");
+        }
     }
 
     void movsbq(const Operand& src, Register dest) {
@@ -569,6 +646,21 @@ class Assembler : public AssemblerX86Shared
             MOZ_CRASH("unexpected operand kind");
         }
     }
+    void andq(Register src, const Operand& dest) {
+        switch (dest.kind()) {
+          case Operand::REG:
+            masm.andq_rr(src.encoding(), dest.reg());
+            break;
+          case Operand::MEM_REG_DISP:
+            masm.andq_rm(src.encoding(), dest.disp(), dest.base());
+            break;
+          case Operand::MEM_SCALE:
+            masm.andq_rm(src.encoding(), dest.disp(), dest.base(), dest.index(), dest.scale());
+            break;
+          default:
+            MOZ_CRASH("unexpected operand kind");
+        }
+    }
 
     void addq(Imm32 imm, Register dest) {
         masm.addq_ir(imm.value, dest.encoding());
@@ -610,6 +702,21 @@ class Assembler : public AssemblerX86Shared
             MOZ_CRASH("unexpected operand kind");
         }
     }
+    void addq(Register src, const Operand& dest) {
+        switch (dest.kind()) {
+          case Operand::REG:
+            masm.addq_rr(src.encoding(), dest.reg());
+            break;
+          case Operand::MEM_REG_DISP:
+            masm.addq_rm(src.encoding(), dest.disp(), dest.base());
+            break;
+          case Operand::MEM_SCALE:
+            masm.addq_rm(src.encoding(), dest.disp(), dest.base(), dest.index(), dest.scale());
+            break;
+          default:
+            MOZ_CRASH("unexpected operand kind");
+        }
+    }
 
     void subq(Imm32 imm, Register dest) {
         masm.subq_ir(imm.value, dest.encoding());
@@ -639,6 +746,9 @@ class Assembler : public AssemblerX86Shared
             break;
           case Operand::MEM_REG_DISP:
             masm.subq_rm(src.encoding(), dest.disp(), dest.base());
+            break;
+          case Operand::MEM_SCALE:
+            masm.subq_rm(src.encoding(), dest.disp(), dest.base(), dest.index(), dest.scale());
             break;
           default:
             MOZ_CRASH("unexpected operand kind");
@@ -695,6 +805,21 @@ class Assembler : public AssemblerX86Shared
             MOZ_CRASH("unexpected operand kind");
         }
     }
+    void orq(Register src, const Operand& dest) {
+        switch (dest.kind()) {
+          case Operand::REG:
+            masm.orq_rr(src.encoding(), dest.reg());
+            break;
+          case Operand::MEM_REG_DISP:
+            masm.orq_rm(src.encoding(), dest.disp(), dest.base());
+            break;
+          case Operand::MEM_SCALE:
+            masm.orq_rm(src.encoding(), dest.disp(), dest.base(), dest.index(), dest.scale());
+            break;
+          default:
+            MOZ_CRASH("unexpected operand kind");
+        }
+    }
     void xorq(Register src, Register dest) {
         masm.xorq_rr(src.encoding(), dest.encoding());
     }
@@ -709,8 +834,26 @@ class Assembler : public AssemblerX86Shared
           case Operand::MEM_REG_DISP:
             masm.xorq_mr(src.disp(), src.base(), dest.encoding());
             break;
+          case Operand::MEM_SCALE:
+            masm.xorq_mr(src.disp(), src.base(), src.index(), src.scale(), dest.encoding());
+            break;
           case Operand::MEM_ADDRESS32:
             masm.xorq_mr(src.address(), dest.encoding());
+            break;
+          default:
+            MOZ_CRASH("unexpected operand kind");
+        }
+    }
+    void xorq(Register src, const Operand& dest) {
+        switch (dest.kind()) {
+          case Operand::REG:
+            masm.xorq_rr(src.encoding(), dest.reg());
+            break;
+          case Operand::MEM_REG_DISP:
+            masm.xorq_rm(src.encoding(), dest.disp(), dest.base());
+            break;
+          case Operand::MEM_SCALE:
+            masm.xorq_rm(src.encoding(), dest.disp(), dest.base(), dest.index(), dest.scale());
             break;
           default:
             MOZ_CRASH("unexpected operand kind");
@@ -794,13 +937,14 @@ class Assembler : public AssemblerX86Shared
     void mov(Register src, Register dest) {
         movq(src, dest);
     }
-    void mov(CodeOffset* label, Register dest) {
+    void mov(CodeLabel* label, Register dest) {
         masm.movq_i64r(/* placeholder */ 0, dest.encoding());
-        label->bind(masm.size());
+        label->patchAt()->bind(masm.size());
     }
     void xchg(Register src, Register dest) {
         xchgq(src, dest);
     }
+
     void lea(const Operand& src, Register dest) {
         switch (src.kind()) {
           case Operand::MEM_REG_DISP:

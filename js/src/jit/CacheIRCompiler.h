@@ -16,13 +16,16 @@ namespace jit {
 // BaselineCacheIRCompiler and IonCacheIRCompiler.
 #define CACHE_IR_SHARED_OPS(_)            \
     _(GuardIsObject)                      \
+    _(GuardIsNullOrUndefined)             \
     _(GuardIsObjectOrNull)                \
     _(GuardIsString)                      \
     _(GuardIsSymbol)                      \
+    _(GuardIsNumber)                      \
     _(GuardIsInt32Index)                  \
     _(GuardType)                          \
     _(GuardClass)                         \
     _(GuardIsNativeFunction)              \
+    _(GuardIsNativeObject)                \
     _(GuardIsProxy)                       \
     _(GuardNotDOMProxy)                   \
     _(GuardSpecificInt32Immediate)        \
@@ -33,9 +36,11 @@ namespace jit {
     _(GuardNoDenseElements)               \
     _(GuardAndGetIndexFromString)         \
     _(GuardIndexIsNonNegative)            \
+    _(GuardTagNotEqual)                   \
     _(LoadProto)                          \
     _(LoadEnclosingEnvironment)           \
     _(LoadWrapperTarget)                  \
+    _(LoadValueTag)                       \
     _(LoadDOMExpandoValue)                \
     _(LoadDOMExpandoValueIgnoreGeneration)\
     _(LoadUndefinedResult)                \
@@ -46,13 +51,19 @@ namespace jit {
     _(LoadStringLengthResult)             \
     _(LoadStringCharResult)               \
     _(LoadArgumentsObjectArgResult)       \
+    _(LoadInstanceOfObjectResult)         \
     _(LoadDenseElementResult)             \
     _(LoadDenseElementHoleResult)         \
     _(LoadDenseElementExistsResult)       \
     _(LoadDenseElementHoleExistsResult)   \
+    _(LoadTypedElementExistsResult)       \
     _(LoadTypedElementResult)             \
     _(LoadObjectResult)                   \
     _(LoadTypeOfObjectResult)             \
+    _(LoadInt32TruthyResult)              \
+    _(LoadDoubleTruthyResult)             \
+    _(LoadStringTruthyResult)             \
+    _(LoadObjectTruthyResult)             \
     _(CompareStringResult)                \
     _(CompareObjectResult)                \
     _(CompareSymbolResult)                \
@@ -61,6 +72,7 @@ namespace jit {
     _(Breakpoint)                         \
     _(MegamorphicLoadSlotByValueResult)   \
     _(MegamorphicHasPropResult)           \
+    _(CallObjectHasSparseElementResult)   \
     _(WrapResult)
 
 // Represents a Value on the Baseline frame's expression stack. Slot 0 is the
@@ -367,6 +379,10 @@ class MOZ_RAII CacheRegisterAllocator
         currentInstruction_++;
     }
 
+    bool isDeadAfterInstruction(OperandId opId) const {
+        return writer_.operandIsDead(opId.id(), currentInstruction_ + 1);
+    }
+
     uint32_t stackPushed() const {
         return stackPushed_;
     }
@@ -558,8 +574,16 @@ class MOZ_RAII CacheIRCompiler
         return FloatRegisterSet::Intersect(liveFloatRegs_.set(), FloatRegisterSet::Volatile());
     }
 
+    bool objectGuardNeedsSpectreMitigations(ObjOperandId objId) const {
+        // Instructions like GuardShape need Spectre mitigations if
+        // (1) mitigations are enabled and (2) the object is used by other
+        // instructions (if the object is *not* used by other instructions,
+        // zeroing its register is pointless).
+        return JitOptions.spectreObjectMitigationsMisc && !allocator.isDeadAfterInstruction(objId);
+    }
+
     void emitLoadTypedObjectResultShared(const Address& fieldAddr, Register scratch,
-                                         TypedThingLayout layout, uint32_t typeDescr,
+                                         uint32_t typeDescr,
                                          const AutoOutputRegister& output);
 
     void emitStoreTypedObjectReferenceProp(ValueOperand val, ReferenceTypeDescr::Type type,
@@ -708,6 +732,8 @@ class CacheIRStubInfo
     js::GCPtr<T>& getStubField(ICStub* stub, uint32_t field) const {
         return getStubField<ICStub, T>(stub, field);
     }
+
+    uintptr_t getStubRawWord(ICStub* stub, uint32_t field) const;
 
     void copyStubData(ICStub* src, ICStub* dest) const;
 };

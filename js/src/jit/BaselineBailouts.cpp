@@ -6,8 +6,8 @@
 
 #include "mozilla/ScopeExit.h"
 
-#include "jsprf.h"
 #include "jsutil.h"
+
 #include "jit/arm/Simulator-arm.h"
 #include "jit/BaselineFrame.h"
 #include "jit/BaselineIC.h"
@@ -18,14 +18,12 @@
 #include "jit/mips64/Simulator-mips64.h"
 #include "jit/Recover.h"
 #include "jit/RematerializedFrame.h"
-
 #include "vm/ArgumentsObject.h"
 #include "vm/Debugger.h"
 #include "vm/TraceLogging.h"
 
-#include "jsscriptinlines.h"
-
 #include "jit/JitFrames-inl.h"
+#include "vm/JSScript-inl.h"
 
 using namespace js;
 using namespace js::jit;
@@ -519,9 +517,11 @@ HasLiveStackValueAtDepth(JSScript* script, jsbytecode* pc, uint32_t stackDepth)
             break;
 
           case JSTRY_FOR_OF:
-            // For-of loops have the iterator and the result.value on stack.
-            // The iterator is below the result.value.
-            if (stackDepth == tn->stackDepth - 1)
+            // For-of loops have the iterator, its next method and the
+            // result.value on stack.
+            // The iterator is below the result.value, the next method below
+            // the iterator.
+            if (stackDepth == tn->stackDepth - 1 || stackDepth == tn->stackDepth - 2)
                 return true;
             break;
 
@@ -627,8 +627,8 @@ IsPrologueBailout(const SnapshotIterator& iter, const ExceptionBailoutInfo* excI
 //                      +===============+
 //
 static bool
-InitFromBailout(JSContext* cx, HandleScript caller, jsbytecode* callerPC,
-                HandleFunction fun, HandleScript script, IonScript* ionScript,
+InitFromBailout(JSContext* cx, jsbytecode* callerPC,
+                HandleFunction fun, HandleScript script,
                 SnapshotIterator& iter, bool invalidate, BaselineStackBuilder& builder,
                 MutableHandle<GCVector<Value>> startFrameFormals, MutableHandleFunction nextCallee,
                 jsbytecode** callPC, const ExceptionBailoutInfo* excInfo)
@@ -1503,7 +1503,7 @@ InitFromBailout(JSContext* cx, HandleScript caller, jsbytecode* callerPC,
 
     // Push return address into the ArgumentsRectifier code, immediately after the ioncode
     // call.
-    void* rectReturnAddr = cx->runtime()->jitRuntime()->getArgumentsRectifierReturnAddr();
+    void* rectReturnAddr = cx->runtime()->jitRuntime()->getArgumentsRectifierReturnAddr().value;
     MOZ_ASSERT(rectReturnAddr);
     if (!builder.writePtr(rectReturnAddr, "ReturnAddr"))
         return false;
@@ -1595,7 +1595,7 @@ jit::BailoutIonToBaseline(JSContext* cx, JitActivation* activation,
 
     if (!excInfo)
         iter.ionScript()->incNumBailouts();
-    iter.script()->updateBaselineOrIonRaw(cx->runtime());
+    iter.script()->updateJitCodeRaw(cx->runtime());
 
     // Allocate buffer to hold stack replacement data.
     BaselineStackBuilder builder(iter, 1024);
@@ -1665,7 +1665,7 @@ jit::BailoutIonToBaseline(JSContext* cx, JitActivation* activation,
 
         jsbytecode* callPC = nullptr;
         RootedFunction nextCallee(cx, nullptr);
-        if (!InitFromBailout(cx, caller, callerPC, fun, scr, iter.ionScript(),
+        if (!InitFromBailout(cx, callerPC, fun, scr,
                              snapIter, invalidate, builder, &startFrameFormals,
                              &nextCallee, &callPC, passExcInfo ? excInfo : nullptr))
         {
@@ -1829,8 +1829,9 @@ CopyFromRematerializedFrame(JSContext* cx, JitActivation* act, uint8_t* fp, size
 
     frame->setReturnValue(rematFrame->returnValue());
 
-    if (rematFrame->hasCachedSavedFrame())
-        frame->setHasCachedSavedFrame();
+    // Don't copy over the hasCachedSavedFrame bit. The new BaselineFrame we're
+    // building has a different AbstractFramePtr, so it won't be found in the
+    // LiveSavedFrameCache if we look there.
 
     JitSpew(JitSpew_BaselineBailouts,
             "  Copied from rematerialized frame at (%p,%zu)",
@@ -1900,7 +1901,7 @@ jit::FinishBailoutToBaseline(BaselineBailoutInfo* bailoutInfo)
     RootedScript outerScript(cx, nullptr);
 
     MOZ_ASSERT(cx->currentlyRunningInJit());
-    JSJitFrameIter iter(cx);
+    JSJitFrameIter iter(cx->activation()->asJit());
     uint8_t* outerFp = nullptr;
 
     // Iter currently points at the exit frame.  Get the previous frame
@@ -1962,7 +1963,7 @@ jit::FinishBailoutToBaseline(BaselineBailoutInfo* bailoutInfo)
     // on.
     JitActivation* act = cx->activation()->asJit();
     if (act->hasRematerializedFrame(outerFp)) {
-        JSJitFrameIter iter(cx);
+        JSJitFrameIter iter(cx->activation()->asJit());
         size_t inlineDepth = numFrames;
         bool ok = true;
         while (inlineDepth > 0) {

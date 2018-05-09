@@ -6,7 +6,6 @@
 
 use ac::AutoCompartment;
 use libc::c_uint;
-use heapsize::HeapSizeOf;
 use std::cell::{Cell, UnsafeCell};
 use std::char;
 use std::ffi;
@@ -17,8 +16,9 @@ use std::u32;
 use std::default::Default;
 use std::marker;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Once, ONCE_INIT};
+use std::sync::{Once, ONCE_INIT, Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
 use jsapi::root::*;
 use jsval::{self, UndefinedValue};
@@ -66,6 +66,7 @@ thread_local!(static CONTEXT: Cell<*mut JSContext> = Cell::new(ptr::null_mut()))
 lazy_static! {
     static ref OUTSTANDING_RUNTIMES: AtomicUsize = AtomicUsize::new(0);
     static ref SHUT_DOWN: AtomicBool = AtomicBool::new(false);
+    static ref SHUT_DOWN_SIGNAL: Arc<Mutex<Option<SyncSender<()>>>> = Arc::new(Mutex::new(None));
 }
 
 /// A wrapper for the `JSContext` structure in SpiderMonkey.
@@ -84,7 +85,11 @@ impl Runtime {
     }
 
     /// Creates a new `JSContext`.
-    pub fn new() -> Result<Runtime, ()> {
+    ///
+    /// * `use_internal_job_queue`: If `true`, then SpiderMonkey's internal
+    /// micro-task job queue is used. If `false`, then it is up to you to
+    /// implement micro-tasks yourself.
+    pub fn new(use_internal_job_queue: bool) -> Result<Runtime, ()> {
         if SHUT_DOWN.load(Ordering::SeqCst) {
             return Err(());
         }
@@ -98,7 +103,6 @@ impl Runtime {
 
             impl Parent {
                 fn set(&self, val: *mut JSContext) {
-                    assert!(self.get().is_null());
                     self.as_atomic().store(val, Ordering::SeqCst);
                     assert_eq!(self.get(), val);
                 }
@@ -122,6 +126,8 @@ impl Runtime {
             ONCE.call_once(|| {
                 // There is a 1:1 relationship between threads and JSContexts,
                 // so we must spawn a new thread for the parent context.
+                let (tx, rx) = sync_channel(0);
+                *SHUT_DOWN_SIGNAL.lock().unwrap() = Some(tx);
                 let _ = thread::spawn(move || {
                     let is_debug_mozjs = cfg!(feature = "debugmozjs");
                     let diagnostic = JS::detail::InitWithFailureDiagnostic(is_debug_mozjs);
@@ -136,9 +142,14 @@ impl Runtime {
                     JS::InitSelfHostedCode(context);
                     PARENT.set(context);
 
-                    loop {
-                        thread::sleep(::std::time::Duration::new(::std::u64::MAX, 0));
-                    }
+                    // The last JSRuntime child died, resume the execution by destroying the parent.
+                    rx.recv().unwrap();
+                    let cx = PARENT.get();
+                    JS_DestroyContext(cx);
+                    JS_ShutDown();
+                    PARENT.set(0 as *mut _);
+                    // Unblock the last child thread, waiting for the JS_ShutDown.
+                    rx.recv().unwrap();
                 });
 
                 while PARENT.get().is_null() {
@@ -176,6 +187,10 @@ impl Runtime {
                 assert!(context.get().is_null());
                 context.set(js_context);
             });
+
+            if use_internal_job_queue {
+                assert!(js::UseInternalJobQueues(js_context, false));
+            }
 
             JS::InitSelfHostedCode(js_context);
 
@@ -246,16 +261,15 @@ impl Drop for Runtime {
 
             if OUTSTANDING_RUNTIMES.fetch_sub(1, Ordering::SeqCst) == 1 {
                 SHUT_DOWN.store(true, Ordering::SeqCst);
-                JS_ShutDown();
+                let signal = &SHUT_DOWN_SIGNAL.lock().unwrap();
+                let signal = signal.as_ref().unwrap();
+                // Send a signal to shutdown the Parent runtime.
+                signal.send(()).unwrap();
+                // Wait for it to be destroyed before resuming the execution
+                // of static variable destructors.
+                signal.send(()).unwrap();
             }
         }
-    }
-}
-
-// This is measured through `glue::CollectServoSizes`.
-impl HeapSizeOf for Runtime {
-    fn heap_size_of_children(&self) -> usize {
-        0
     }
 }
 
@@ -1097,4 +1111,127 @@ pub unsafe fn maybe_wrap_value(cx: *mut JSContext, rval: JS::MutableHandleValue)
     } else if rval.is_object() {
         maybe_wrap_object_value(cx, rval);
     }
+}
+
+/// Equivalents of the JS_FN* macros.
+impl JSFunctionSpec {
+    pub fn js_fs(name: *const ::std::os::raw::c_char,
+                 func: JSNative,
+                 nargs: u16,
+                 flags: u16) -> JSFunctionSpec {
+        JSFunctionSpec {
+            name: name,
+            call: JSNativeWrapper {
+                op: func,
+                info: ptr::null(),
+            },
+            nargs: nargs,
+            flags: flags,
+            selfHostedName: 0 as *const _,
+        }
+    }
+
+    pub fn js_fn(name: *const ::std::os::raw::c_char,
+                 func: JSNative,
+                 nargs: u16,
+                 flags: u16) -> JSFunctionSpec {
+        JSFunctionSpec {
+            name: name,
+            call: JSNativeWrapper {
+                op: func,
+                info: ptr::null(),
+            },
+            nargs: nargs,
+            flags: flags,
+            selfHostedName: 0 as *const _,
+        }
+    }
+
+    pub const NULL: JSFunctionSpec = JSFunctionSpec {
+        name: 0 as *const _,
+        call: JSNativeWrapper {
+            op: None,
+            info: 0 as *const _,
+        },
+        nargs: 0,
+        flags: 0,
+        selfHostedName: 0 as *const _,
+    };
+}
+
+/// Equivalents of the JS_PS* macros.
+impl JSPropertySpec {
+    pub fn getter(name: *const ::std::os::raw::c_char, flags: u8, func: JSNative)
+                        -> JSPropertySpec {
+        debug_assert_eq!(flags & !(JSPROP_ENUMERATE | JSPROP_PERMANENT), 0);
+        JSPropertySpec {
+            name: name,
+            flags: flags,
+            __bindgen_anon_1: JSPropertySpec__bindgen_ty_1 {
+                accessors: JSPropertySpec__bindgen_ty_1__bindgen_ty_1 {
+                    getter: JSPropertySpec__bindgen_ty_1__bindgen_ty_1__bindgen_ty_1 {
+                        native: JSNativeWrapper {
+                            op: func,
+                            info: ptr::null(),
+                        },
+                    },
+                    setter: JSPropertySpec__bindgen_ty_1__bindgen_ty_1__bindgen_ty_2 {
+                        native: JSNativeWrapper {
+                            op: None,
+                            info: ptr::null(),
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn getter_setter(name: *const ::std::os::raw::c_char,
+                         flags: u8,
+                         g_f: JSNative,
+                         s_f: JSNative)
+                         -> JSPropertySpec {
+        debug_assert_eq!(flags & !(JSPROP_ENUMERATE | JSPROP_PERMANENT), 0);
+        JSPropertySpec {
+            name: name,
+            flags: flags,
+            __bindgen_anon_1: JSPropertySpec__bindgen_ty_1 {
+                accessors: JSPropertySpec__bindgen_ty_1__bindgen_ty_1 {
+                    getter: JSPropertySpec__bindgen_ty_1__bindgen_ty_1__bindgen_ty_1 {
+                        native: JSNativeWrapper {
+                            op: g_f,
+                            info: ptr::null(),
+                        },
+                    },
+                    setter: JSPropertySpec__bindgen_ty_1__bindgen_ty_1__bindgen_ty_2 {
+                        native: JSNativeWrapper {
+                            op: s_f,
+                            info: ptr::null(),
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    pub const NULL: JSPropertySpec = JSPropertySpec {
+        name: 0 as *const _,
+        flags: 0,
+        __bindgen_anon_1: JSPropertySpec__bindgen_ty_1{
+            accessors: JSPropertySpec__bindgen_ty_1__bindgen_ty_1 {
+                getter: JSPropertySpec__bindgen_ty_1__bindgen_ty_1__bindgen_ty_1 {
+                    native: JSNativeWrapper {
+                        op: None,
+                        info: 0 as *const _,
+                    },
+                },
+                setter: JSPropertySpec__bindgen_ty_1__bindgen_ty_1__bindgen_ty_2 {
+                    native: JSNativeWrapper {
+                        op: None,
+                        info: 0 as *const _,
+                    },
+                }
+            }
+        }
+    };
 }

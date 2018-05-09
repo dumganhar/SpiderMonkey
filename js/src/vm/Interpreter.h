@@ -11,9 +11,9 @@
  * JS interpreter interface.
  */
 
-#include "jsiter.h"
 #include "jspubtd.h"
 
+#include "vm/Iteration.h"
 #include "vm/Stack.h"
 
 namespace js {
@@ -583,7 +583,7 @@ bool
 ThrowUninitializedThis(JSContext* cx, AbstractFramePtr frame);
 
 bool
-ThrowInitializedThis(JSContext* cx, AbstractFramePtr frame);
+ThrowInitializedThis(JSContext* cx);
 
 bool
 DefaultClassConstructor(JSContext* cx, unsigned argc, Value* vp);

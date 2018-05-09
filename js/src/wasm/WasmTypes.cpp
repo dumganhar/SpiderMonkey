@@ -18,24 +18,38 @@
 
 #include "wasm/WasmTypes.h"
 
+#include "vm/ArrayBufferObject.h"
 #include "wasm/WasmBaselineCompile.h"
 #include "wasm/WasmInstance.h"
 #include "wasm/WasmSerialize.h"
 
-#include "jsobjinlines.h"
+#include "vm/JSObject-inl.h"
 
 using namespace js;
 using namespace js::jit;
 using namespace js::wasm;
 
 using mozilla::IsPowerOfTwo;
+using mozilla::MakeEnumeratedRange;
 
-// A sanity check.  We have only tested WASM_HUGE_MEMORY on x64, and only tested
-// x64 with WASM_HUGE_MEMORY.
+// We have only tested x64 with WASM_HUGE_MEMORY.
 
-#if defined(WASM_HUGE_MEMORY) != defined(JS_CODEGEN_X64)
-#  error "Not an expected configuration"
+#if defined(JS_CODEGEN_X64) && !defined(WASM_HUGE_MEMORY)
+#    error "Not an expected configuration"
 #endif
+
+// We have only tested WASM_HUGE_MEMORY on x64 and arm64.
+
+#if defined(WASM_HUGE_MEMORY)
+#  if !(defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_ARM64))
+#    error "Not an expected configuration"
+#  endif
+#endif
+
+// Another sanity check.
+
+static_assert(MaxMemoryInitialPages <= ArrayBufferObject::MaxBufferByteLength / PageSize,
+              "Memory sizing constraint");
 
 void
 Val::writePayload(uint8_t* dst) const
@@ -95,6 +109,7 @@ GetCPUID()
         ARM = 0x3,
         MIPS = 0x4,
         MIPS64 = 0x5,
+        ARM64 = 0x6,
         ARCH_BITS = 3
     };
 
@@ -108,7 +123,8 @@ GetCPUID()
     MOZ_ASSERT(jit::GetARMFlags() <= (UINT32_MAX >> ARCH_BITS));
     return ARM | (jit::GetARMFlags() << ARCH_BITS);
 #elif defined(JS_CODEGEN_ARM64)
-    MOZ_CRASH("not enabled");
+    MOZ_ASSERT(jit::GetARM64Flags() <= (UINT32_MAX >> ARCH_BITS));
+    return ARM64 | (jit::GetARM64Flags() << ARCH_BITS);
 #elif defined(JS_CODEGEN_MIPS32)
     MOZ_ASSERT(jit::GetMIPSFlags() <= (UINT32_MAX >> ARCH_BITS));
     return MIPS | (jit::GetMIPSFlags() << ARCH_BITS);
@@ -556,6 +572,15 @@ wasm::ComputeMappedSize(uint32_t maxSize)
 
 #endif  // WASM_HUGE_MEMORY
 
+/* static */ DebugFrame*
+DebugFrame::from(Frame* fp)
+{
+    MOZ_ASSERT(fp->tls->instance->code().metadata().debugEnabled);
+    auto* df = reinterpret_cast<DebugFrame*>((uint8_t*)fp - DebugFrame::offsetOfFrame());
+    MOZ_ASSERT(fp->instance() == df->instance());
+    return df;
+}
+
 void
 DebugFrame::alignmentStaticAsserts()
 {
@@ -675,6 +700,75 @@ DebugFrame::leave(JSContext* cx)
     }
 }
 
+bool
+TrapSiteVectorArray::empty() const
+{
+    for (Trap trap : MakeEnumeratedRange(Trap::Limit)) {
+        if (!(*this)[trap].empty())
+            return false;
+    }
+
+    return true;
+}
+
+void
+TrapSiteVectorArray::clear()
+{
+    for (Trap trap : MakeEnumeratedRange(Trap::Limit))
+        (*this)[trap].clear();
+}
+
+void
+TrapSiteVectorArray::swap(TrapSiteVectorArray& rhs)
+{
+    for (Trap trap : MakeEnumeratedRange(Trap::Limit))
+        (*this)[trap].swap(rhs[trap]);
+}
+
+void
+TrapSiteVectorArray::podResizeToFit()
+{
+    for (Trap trap : MakeEnumeratedRange(Trap::Limit))
+        (*this)[trap].podResizeToFit();
+}
+
+size_t
+TrapSiteVectorArray::serializedSize() const
+{
+    size_t ret = 0;
+    for (Trap trap : MakeEnumeratedRange(Trap::Limit))
+        ret += SerializedPodVectorSize((*this)[trap]);
+    return ret;
+}
+
+uint8_t*
+TrapSiteVectorArray::serialize(uint8_t* cursor) const
+{
+    for (Trap trap : MakeEnumeratedRange(Trap::Limit))
+        cursor = SerializePodVector(cursor, (*this)[trap]);
+    return cursor;
+}
+
+const uint8_t*
+TrapSiteVectorArray::deserialize(const uint8_t* cursor)
+{
+    for (Trap trap : MakeEnumeratedRange(Trap::Limit)) {
+        cursor = DeserializePodVector(cursor, &(*this)[trap]);
+        if (!cursor)
+            return nullptr;
+    }
+    return cursor;
+}
+
+size_t
+TrapSiteVectorArray::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const
+{
+    size_t ret = 0;
+    for (Trap trap : MakeEnumeratedRange(Trap::Limit))
+        ret += (*this)[trap].sizeOfExcludingThis(mallocSizeOf);
+    return ret;
+}
+
 CodeRange::CodeRange(Kind kind, Offsets offsets)
   : begin_(offsets.begin),
     ret_(0),
@@ -688,6 +782,7 @@ CodeRange::CodeRange(Kind kind, Offsets offsets)
       case FarJumpIsland:
       case OutOfBoundsExit:
       case UnalignedExit:
+      case TrapExit:
       case Throw:
       case Interrupt:
         break;
@@ -707,7 +802,7 @@ CodeRange::CodeRange(Kind kind, uint32_t funcIndex, Offsets offsets)
     u.func.lineOrBytecode_ = 0;
     u.func.beginToNormalEntry_ = 0;
     u.func.beginToTierEntry_ = 0;
-    MOZ_ASSERT(kind == InterpEntry);
+    MOZ_ASSERT(isEntry());
     MOZ_ASSERT(begin_ <= end_);
 }
 
@@ -722,7 +817,7 @@ CodeRange::CodeRange(Kind kind, CallableOffsets offsets)
     PodZero(&u);
 #ifdef DEBUG
     switch (kind_) {
-      case TrapExit:
+      case OldTrapExit:
       case DebugTrap:
       case BuiltinThunk:
         break;
@@ -767,7 +862,7 @@ CodeRange::CodeRange(Trap trap, CallableOffsets offsets)
   : begin_(offsets.begin),
     ret_(offsets.ret),
     end_(offsets.end),
-    kind_(TrapExit)
+    kind_(OldTrapExit)
 {
     MOZ_ASSERT(begin_ < ret_);
     MOZ_ASSERT(ret_ < end_);
@@ -801,4 +896,19 @@ wasm::LookupInSorted(const CodeRangeVector& codeRanges, CodeRange::OffsetInCode 
         return nullptr;
 
     return &codeRanges[match];
+}
+
+UniqueTlsData
+wasm::CreateTlsData(uint32_t globalDataLength)
+{
+    MOZ_ASSERT(globalDataLength % gc::SystemPageSize() == 0);
+
+    void* allocatedBase = js_calloc(TlsDataAlign + offsetof(TlsData, globalArea) + globalDataLength);
+    if (!allocatedBase)
+        return nullptr;
+
+    auto* tlsData = reinterpret_cast<TlsData*>(AlignBytes(uintptr_t(allocatedBase), TlsDataAlign));
+    tlsData->allocatedBase = allocatedBase;
+
+    return UniqueTlsData(tlsData);
 }

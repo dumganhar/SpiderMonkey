@@ -77,13 +77,16 @@ class ABIArgGenerator
     ABIArg next(MIRType argType);
     ABIArg& current() { return current_; }
     uint32_t stackBytesConsumedSoFar() const { return stackOffset_; }
-
 };
 
 // These registers may be volatile or nonvolatile.
 static constexpr Register ABINonArgReg0 = eax;
 static constexpr Register ABINonArgReg1 = ebx;
 static constexpr Register ABINonArgReg2 = ecx;
+
+// This register may be volatile or nonvolatile. Avoid xmm7 which is the
+// ScratchDoubleReg.
+static constexpr FloatRegister ABINonArgDoubleReg = FloatRegister(X86Encoding::xmm0, FloatRegisters::Double);
 
 // These registers may be volatile or nonvolatile.
 // Note: these three registers are all guaranteed to be different
@@ -228,7 +231,7 @@ HighWord(const Operand& op) {
 }
 
 // Return operand from a JS -> JS call.
-static const ValueOperand JSReturnOperand = ValueOperand(JSReturnReg_Type, JSReturnReg_Data);
+static constexpr ValueOperand JSReturnOperand{JSReturnReg_Type, JSReturnReg_Data};
 
 class Assembler : public AssemblerX86Shared
 {
@@ -347,10 +350,10 @@ class Assembler : public AssemblerX86Shared
     void mov(Imm32 imm, const Operand& dest) {
         movl(imm, dest);
     }
-    void mov(CodeOffset* label, Register dest) {
+    void mov(CodeLabel* label, Register dest) {
         // Put a placeholder value in the instruction stream.
         masm.movl_i32r(0, dest.encoding());
-        label->bind(masm.size());
+        label->patchAt()->bind(masm.size());
     }
     void mov(Register src, Register dest) {
         movl(src, dest);
@@ -421,12 +424,36 @@ class Assembler : public AssemblerX86Shared
     void adcl(Register src, Register dest) {
         masm.adcl_rr(src.encoding(), dest.encoding());
     }
+    void adcl(Operand src, Register dest) {
+        switch (src.kind()) {
+          case Operand::MEM_REG_DISP:
+            masm.adcl_mr(src.disp(), src.base(), dest.encoding());
+            break;
+          case Operand::MEM_SCALE:
+            masm.adcl_mr(src.disp(), src.base(), src.index(), src.scale(), dest.encoding());
+            break;
+          default:
+            MOZ_CRASH("unexpected operand kind");
+        }
+    }
 
     void sbbl(Imm32 imm, Register dest) {
         masm.sbbl_ir(imm.value, dest.encoding());
     }
     void sbbl(Register src, Register dest) {
         masm.sbbl_rr(src.encoding(), dest.encoding());
+    }
+    void sbbl(Operand src, Register dest) {
+        switch (src.kind()) {
+          case Operand::MEM_REG_DISP:
+            masm.sbbl_mr(src.disp(), src.base(), dest.encoding());
+            break;
+          case Operand::MEM_SCALE:
+            masm.sbbl_mr(src.disp(), src.base(), src.index(), src.scale(), dest.encoding());
+            break;
+          default:
+            MOZ_CRASH("unexpected operand kind");
+        }
     }
 
     void mull(Register multiplier) {

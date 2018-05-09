@@ -24,10 +24,10 @@
 #if defined(XP_DARWIN)
 # include <mach/mach.h>
 #endif
-#include "threading/Thread.h"
 
-struct JSContext;
-struct JSRuntime;
+#include "js/TypeDecls.h"
+#include "threading/Thread.h"
+#include "wasm/WasmTypes.h"
 
 namespace js {
 
@@ -48,12 +48,12 @@ EnsureSignalHandlers(JSContext* cx);
 bool
 HaveSignalHandlers();
 
-class CodeSegment;
+class ModuleSegment;
 
 // Returns true if wasm code is on top of the activation stack (and fills out
 // the code segment outparam in this case), or false otherwise.
 bool
-InInterruptibleCode(JSContext* cx, uint8_t* pc, const CodeSegment** cs);
+InInterruptibleCode(JSContext* cx, uint8_t* pc, const ModuleSegment** ms);
 
 #if defined(XP_DARWIN)
 // On OSX we are forced to use the lower-level Mach exception mechanism instead
@@ -78,6 +78,35 @@ class MachExceptionHandler
     bool install(JSContext* cx);
 };
 #endif
+
+// Typed wrappers encapsulating the data saved by the signal handler on async
+// interrupt or trap. On interrupt, the PC at which to resume is saved. On trap,
+// the bytecode offset to be reported in callstacks is saved.
+
+struct InterruptData
+{
+    // The pc to use for unwinding purposes which is kept consistent with fp at
+    // call boundaries.
+    void* unwindPC;
+
+    // The pc at which we should return if the interrupt doesn't stop execution.
+    void* resumePC;
+
+    InterruptData(void* unwindPC, void* resumePC)
+      : unwindPC(unwindPC), resumePC(resumePC)
+    {}
+};
+
+struct TrapData
+{
+    void* pc;
+    Trap trap;
+    uint32_t bytecodeOffset;
+
+    TrapData(void* pc, Trap trap, uint32_t bytecodeOffset)
+      : pc(pc), trap(trap), bytecodeOffset(bytecodeOffset)
+    {}
+};
 
 } // namespace wasm
 } // namespace js

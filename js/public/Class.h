@@ -40,8 +40,6 @@ extern JS_FRIEND_DATA(const js::Class* const) FunctionClassPtr;
 
 namespace JS {
 
-class AutoIdVector;
-
 /**
  * The answer to a successful query as to whether an object is an Array per
  * ES6's internal |IsArray| operation (as exposed by |Array.isArray|).
@@ -470,14 +468,6 @@ typedef bool
  */
 typedef void
 (* JSFinalizeOp)(JSFreeOp* fop, JSObject* obj);
-
-/**
- * Finalizes external strings created by JS_NewExternalString. The finalizer
- * can be called off the main thread.
- */
-struct JSStringFinalizer {
-    void (*finalize)(const JSStringFinalizer* fin, char16_t* chars);
-};
 
 /**
  * Check whether v is an instance of obj.  Return false on error or exception,

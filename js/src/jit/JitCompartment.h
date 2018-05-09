@@ -88,45 +88,55 @@ class JitRuntime
     ActiveThreadData<ExecutableAllocator> backedgeExecAlloc_;
 
     // Shared exception-handler tail.
-    ExclusiveAccessLockWriteOnceData<JitCode*> exceptionTail_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> exceptionTailOffset_;
 
     // Shared post-bailout-handler tail.
-    ExclusiveAccessLockWriteOnceData<JitCode*> bailoutTail_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> bailoutTailOffset_;
 
     // Shared profiler exit frame tail.
-    ExclusiveAccessLockWriteOnceData<JitCode*> profilerExitFrameTail_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> profilerExitFrameTailOffset_;
 
     // Trampoline for entering JIT code.
-    ExclusiveAccessLockWriteOnceData<JitCode*> enterJIT_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> enterJITOffset_;
 
     // Vector mapping frame class sizes to bailout tables.
-    typedef Vector<JitCode*, 4, SystemAllocPolicy> BailoutTableVector;
+    struct BailoutTable {
+        uint32_t startOffset;
+        uint32_t size;
+        BailoutTable(uint32_t startOffset, uint32_t size)
+          : startOffset(startOffset), size(size)
+        {}
+    };
+    typedef Vector<BailoutTable, 4, SystemAllocPolicy> BailoutTableVector;
     ExclusiveAccessLockWriteOnceData<BailoutTableVector> bailoutTables_;
 
     // Generic bailout table; used if the bailout table overflows.
-    ExclusiveAccessLockWriteOnceData<JitCode*> bailoutHandler_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> bailoutHandlerOffset_;
 
     // Argument-rectifying thunk, in the case of insufficient arguments passed
     // to a function call site.
-    ExclusiveAccessLockWriteOnceData<JitCode*> argumentsRectifier_;
-    ExclusiveAccessLockWriteOnceData<void*> argumentsRectifierReturnAddr_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> argumentsRectifierOffset_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> argumentsRectifierReturnOffset_;
 
     // Thunk that invalides an (Ion compiled) caller on the Ion stack.
-    ExclusiveAccessLockWriteOnceData<JitCode*> invalidator_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> invalidatorOffset_;
 
     // Thunk that calls the GC pre barrier.
-    ExclusiveAccessLockWriteOnceData<JitCode*> valuePreBarrier_;
-    ExclusiveAccessLockWriteOnceData<JitCode*> stringPreBarrier_;
-    ExclusiveAccessLockWriteOnceData<JitCode*> objectPreBarrier_;
-    ExclusiveAccessLockWriteOnceData<JitCode*> shapePreBarrier_;
-    ExclusiveAccessLockWriteOnceData<JitCode*> objectGroupPreBarrier_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> valuePreBarrierOffset_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> stringPreBarrierOffset_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> objectPreBarrierOffset_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> shapePreBarrierOffset_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> objectGroupPreBarrierOffset_;
 
     // Thunk to call malloc/free.
-    ExclusiveAccessLockWriteOnceData<JitCode*> mallocStub_;
-    ExclusiveAccessLockWriteOnceData<JitCode*> freeStub_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> mallocStubOffset_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> freeStubOffset_;
 
     // Thunk called to finish compilation of an IonScript.
-    ExclusiveAccessLockWriteOnceData<JitCode*> lazyLinkStub_;
+    ExclusiveAccessLockWriteOnceData<uint32_t> lazyLinkStubOffset_;
+
+    // Thunk to enter the interpreter from JIT code.
+    ExclusiveAccessLockWriteOnceData<uint32_t> interpreterStubOffset_;
 
     // Thunk used by the debugger for breakpoint and step mode.
     ExclusiveAccessLockWriteOnceData<JitCode*> debugTrapHandler_;
@@ -135,8 +145,12 @@ class JitRuntime
     ExclusiveAccessLockWriteOnceData<JitCode*> baselineDebugModeOSRHandler_;
     ExclusiveAccessLockWriteOnceData<void*> baselineDebugModeOSRHandlerNoFrameRegPopAddr_;
 
-    // Map VMFunction addresses to the JitCode of the wrapper.
-    using VMWrapperMap = HashMap<const VMFunction*, JitCode*>;
+    // Code for trampolines and VMFunction wrappers.
+    ExclusiveAccessLockWriteOnceData<JitCode*> trampolineCode_;
+
+    // Map VMFunction addresses to the offset of the wrapper in
+    // trampolineCode_.
+    using VMWrapperMap = HashMap<const VMFunction*, uint32_t, VMFunction>;
     ExclusiveAccessLockWriteOnceData<VMWrapperMap*> functionWrappers_;
 
     // If true, the signal handler to interrupt Ion code should not attempt to
@@ -147,29 +161,38 @@ class JitRuntime
     UnprotectedData<JitcodeGlobalTable*> jitcodeGlobalTable_;
 
   private:
-    JitCode* generateLazyLinkStub(JSContext* cx);
-    JitCode* generateProfilerExitFrameTailStub(JSContext* cx);
-    JitCode* generateExceptionTailStub(JSContext* cx, void* handler);
-    JitCode* generateBailoutTailStub(JSContext* cx);
-    JitCode* generateEnterJIT(JSContext* cx);
-    JitCode* generateArgumentsRectifier(JSContext* cx, void** returnAddrOut);
-    JitCode* generateBailoutTable(JSContext* cx, uint32_t frameClass);
-    JitCode* generateBailoutHandler(JSContext* cx);
-    JitCode* generateInvalidator(JSContext* cx);
-    JitCode* generatePreBarrier(JSContext* cx, MIRType type);
-    JitCode* generateMallocStub(JSContext* cx);
-    JitCode* generateFreeStub(JSContext* cx);
+    void generateLazyLinkStub(MacroAssembler& masm);
+    void generateInterpreterStub(MacroAssembler& masm);
+    void generateProfilerExitFrameTailStub(MacroAssembler& masm, Label* profilerExitTail);
+    void generateExceptionTailStub(MacroAssembler& masm, void* handler, Label* profilerExitTail);
+    void generateBailoutTailStub(MacroAssembler& masm, Label* bailoutTail);
+    void generateEnterJIT(JSContext* cx, MacroAssembler& masm);
+    void generateArgumentsRectifier(MacroAssembler& masm);
+    BailoutTable generateBailoutTable(MacroAssembler& masm, Label* bailoutTail, uint32_t frameClass);
+    void generateBailoutHandler(MacroAssembler& masm, Label* bailoutTail);
+    void generateInvalidator(MacroAssembler& masm, Label* bailoutTail);
+    uint32_t generatePreBarrier(JSContext* cx, MacroAssembler& masm, MIRType type);
+    void generateMallocStub(MacroAssembler& masm);
+    void generateFreeStub(MacroAssembler& masm);
     JitCode* generateDebugTrapHandler(JSContext* cx);
     JitCode* generateBaselineDebugModeOSRHandler(JSContext* cx, uint32_t* noFrameRegPopOffsetOut);
-    JitCode* generateVMWrapper(JSContext* cx, const VMFunction& f);
+    bool generateVMWrapper(JSContext* cx, MacroAssembler& masm, const VMFunction& f);
 
-    bool generateTLEventVM(JSContext* cx, MacroAssembler& masm, const VMFunction& f, bool enter);
+    bool generateTLEventVM(MacroAssembler& masm, const VMFunction& f, bool enter);
 
-    inline bool generateTLEnterVM(JSContext* cx, MacroAssembler& masm, const VMFunction& f) {
-        return generateTLEventVM(cx, masm, f, /* enter = */ true);
+    inline bool generateTLEnterVM(MacroAssembler& masm, const VMFunction& f) {
+        return generateTLEventVM(masm, f, /* enter = */ true);
     }
-    inline bool generateTLExitVM(JSContext* cx, MacroAssembler& masm, const VMFunction& f) {
-        return generateTLEventVM(cx, masm, f, /* enter = */ false);
+    inline bool generateTLExitVM(MacroAssembler& masm, const VMFunction& f) {
+        return generateTLEventVM(masm, f, /* enter = */ false);
+    }
+
+    uint32_t startTrampolineCode(MacroAssembler& masm);
+
+    TrampolinePtr trampolineCode(uint32_t offset) const {
+        MOZ_ASSERT(offset > 0);
+        MOZ_ASSERT(offset < trampolineCode_->instructionsSize());
+        return TrampolinePtr(trampolineCode_->raw() + offset);
     }
 
   public:
@@ -224,66 +247,75 @@ class JitRuntime
         return preventBackedgePatching_;
     }
 
-    JitCode* getVMWrapper(const VMFunction& f) const;
+    TrampolinePtr getVMWrapper(const VMFunction& f) const;
     JitCode* debugTrapHandler(JSContext* cx);
     JitCode* getBaselineDebugModeOSRHandler(JSContext* cx);
     void* getBaselineDebugModeOSRHandlerAddress(JSContext* cx, bool popFrameReg);
 
-    JitCode* getGenericBailoutHandler() const {
-        return bailoutHandler_;
+    TrampolinePtr getGenericBailoutHandler() const {
+        return trampolineCode(bailoutHandlerOffset_);
     }
 
-    JitCode* getExceptionTail() const {
-        return exceptionTail_;
+    TrampolinePtr getExceptionTail() const {
+        return trampolineCode(exceptionTailOffset_);
     }
 
-    JitCode* getBailoutTail() const {
-        return bailoutTail_;
+    TrampolinePtr getBailoutTail() const {
+        return trampolineCode(bailoutTailOffset_);
     }
 
-    JitCode* getProfilerExitFrameTail() const {
-        return profilerExitFrameTail_;
+    TrampolinePtr getProfilerExitFrameTail() const {
+        return trampolineCode(profilerExitFrameTailOffset_);
     }
 
-    JitCode* getBailoutTable(const FrameSizeClass& frameClass) const;
+    TrampolinePtr getBailoutTable(const FrameSizeClass& frameClass) const;
+    uint32_t getBailoutTableSize(const FrameSizeClass& frameClass) const;
 
-    JitCode* getArgumentsRectifier() const {
-        return argumentsRectifier_;
+    TrampolinePtr getArgumentsRectifier() const {
+        return trampolineCode(argumentsRectifierOffset_);
     }
 
-    void* getArgumentsRectifierReturnAddr() const {
-        return argumentsRectifierReturnAddr_;
+    TrampolinePtr getArgumentsRectifierReturnAddr() const {
+        return trampolineCode(argumentsRectifierReturnOffset_);
     }
 
-    JitCode* getInvalidationThunk() const {
-        return invalidator_;
+    TrampolinePtr getInvalidationThunk() const {
+        return trampolineCode(invalidatorOffset_);
     }
 
     EnterJitCode enterJit() const {
-        return enterJIT_->as<EnterJitCode>();
+        return JS_DATA_TO_FUNC_PTR(EnterJitCode, trampolineCode(enterJITOffset_).value);
     }
 
-    JitCode* preBarrier(MIRType type) const {
+    TrampolinePtr preBarrier(MIRType type) const {
         switch (type) {
-          case MIRType::Value: return valuePreBarrier_;
-          case MIRType::String: return stringPreBarrier_;
-          case MIRType::Object: return objectPreBarrier_;
-          case MIRType::Shape: return shapePreBarrier_;
-          case MIRType::ObjectGroup: return objectGroupPreBarrier_;
+          case MIRType::Value:
+            return trampolineCode(valuePreBarrierOffset_);
+          case MIRType::String:
+            return trampolineCode(stringPreBarrierOffset_);
+          case MIRType::Object:
+            return trampolineCode(objectPreBarrierOffset_);
+          case MIRType::Shape:
+            return trampolineCode(shapePreBarrierOffset_);
+          case MIRType::ObjectGroup:
+            return trampolineCode(objectGroupPreBarrierOffset_);
           default: MOZ_CRASH();
         }
     }
 
-    JitCode* mallocStub() const {
-        return mallocStub_;
+    TrampolinePtr mallocStub() const {
+        return trampolineCode(mallocStubOffset_);
     }
 
-    JitCode* freeStub() const {
-        return freeStub_;
+    TrampolinePtr freeStub() const {
+        return trampolineCode(freeStubOffset_);
     }
 
-    JitCode* lazyLinkStub() const {
-        return lazyLinkStub_;
+    TrampolinePtr lazyLinkStub() const {
+        return trampolineCode(lazyLinkStubOffset_);
+    }
+    TrampolinePtr interpreterStub() const {
+        return trampolineCode(interpreterStubOffset_);
     }
 
     bool hasJitcodeGlobalTable() const {
@@ -410,7 +442,7 @@ class JitZone
 
   public:
     MOZ_MUST_USE bool init(JSContext* cx);
-    void sweep(FreeOp* fop);
+    void sweep();
 
     void addSizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf,
                                 size_t* jitZone,
@@ -498,16 +530,27 @@ class JitCompartment
                              BailoutReturnStub::Count,
                              BailoutReturnStubInfo> bailoutReturnStubInfo_;
 
-    // Stubs to concatenate two strings inline, or perform RegExp calls inline.
-    // These bake in zone and compartment specific pointers and can't be stored
-    // in JitRuntime. These are weak pointers, but are not declared as
-    // ReadBarriered since they are only read from during Ion compilation,
-    // which may occur off thread and whose barriers are captured during
-    // CodeGenerator::link.
-    JitCode* stringConcatStub_;
-    JitCode* regExpMatcherStub_;
-    JitCode* regExpSearcherStub_;
-    JitCode* regExpTesterStub_;
+    // The JitCompartment stores stubs to concatenate strings inline and perform
+    // RegExp calls inline.  These bake in zone and compartment specific
+    // pointers and can't be stored in JitRuntime.
+    //
+    // These are weak pointers, but they can by accessed during off-thread Ion
+    // compilation and therefore can't use the usual read barrier. Instead, we
+    // record which stubs have been read and perform the appropriate barriers in
+    // CodeGenerator::link().
+
+    enum StubIndex : uint32_t
+    {
+        StringConcat = 0,
+        RegExpMatcher,
+        RegExpSearcher,
+        RegExpTester,
+        Count
+    };
+
+    mozilla::EnumeratedArray<StubIndex, StubIndex::Count, ReadBarrieredJitCode> stubs_;
+
+    // The same approach is taken for SIMD template objects.
 
     mozilla::EnumeratedArray<SimdType, SimdType::Count, ReadBarrieredObject> simdTemplateObjects_;
 
@@ -515,6 +558,12 @@ class JitCompartment
     JitCode* generateRegExpMatcherStub(JSContext* cx);
     JitCode* generateRegExpSearcherStub(JSContext* cx);
     JitCode* generateRegExpTesterStub(JSContext* cx);
+
+    JitCode* getStubNoBarrier(StubIndex stub, uint32_t* requiredBarriersOut) const {
+        MOZ_ASSERT(CurrentThreadIsIonCompiling());
+        *requiredBarriersOut |= 1 << uint32_t(stub);
+        return stubs_[stub].unbarrieredGet();
+    }
 
   public:
     JSObject* getSimdTemplateObjectFor(JSContext* cx, Handle<SimdTypeDescr*> descr) {
@@ -525,20 +574,13 @@ class JitCompartment
     }
 
     JSObject* maybeGetSimdTemplateObjectFor(SimdType type) const {
-        const ReadBarrieredObject& tpl = simdTemplateObjects_[type];
+        // This function is used by Eager Simd Unbox phase which can run
+        // off-thread, so we cannot use the usual read barrier. For more
+        // information, see the comment above
+        // CodeGenerator::simdRefreshTemplatesDuringLink_.
 
-        // This function is used by Eager Simd Unbox phase, so we cannot use the
-        // read barrier. For more information, see the comment above
-        // CodeGenerator::simdRefreshTemplatesDuringLink_ .
-        return tpl.unbarrieredGet();
-    }
-
-    // This function is used to call the read barrier, to mark the SIMD template
-    // type as used. This function can only be called from the active thread.
-    void registerSimdTemplateObjectFor(SimdType type) {
-        ReadBarrieredObject& tpl = simdTemplateObjects_[type];
-        MOZ_ASSERT(tpl.unbarrieredGet());
-        tpl.get();
+        MOZ_ASSERT(CurrentThreadIsIonCompiling());
+        return simdTemplateObjects_[type].unbarrieredGet();
     }
 
     JitCode* getStubCode(uint32_t key) {
@@ -570,48 +612,70 @@ class JitCompartment
     MOZ_MUST_USE bool initialize(JSContext* cx);
 
     // Initialize code stubs only used by Ion, not Baseline.
-    MOZ_MUST_USE bool ensureIonStubsExist(JSContext* cx);
-
-    void sweep(FreeOp* fop, JSCompartment* compartment);
-
-    JitCode* stringConcatStubNoBarrier() const {
-        return stringConcatStub_;
+    MOZ_MUST_USE bool ensureIonStubsExist(JSContext* cx) {
+        if (stubs_[StringConcat])
+            return true;
+        stubs_[StringConcat] = generateStringConcatStub(cx);
+        return stubs_[StringConcat];
     }
 
-    JitCode* regExpMatcherStubNoBarrier() const {
-        return regExpMatcherStub_;
+    void sweep(JSCompartment* compartment);
+
+    void discardStubs() {
+        for (ReadBarrieredJitCode& stubRef : stubs_)
+            stubRef = nullptr;
+    }
+
+    JitCode* stringConcatStubNoBarrier(uint32_t* requiredBarriersOut) const {
+        return getStubNoBarrier(StringConcat, requiredBarriersOut);
+    }
+
+    JitCode* regExpMatcherStubNoBarrier(uint32_t* requiredBarriersOut) const {
+        return getStubNoBarrier(RegExpMatcher, requiredBarriersOut);
     }
 
     MOZ_MUST_USE bool ensureRegExpMatcherStubExists(JSContext* cx) {
-        if (regExpMatcherStub_)
+        if (stubs_[RegExpMatcher])
             return true;
-        regExpMatcherStub_ = generateRegExpMatcherStub(cx);
-        return regExpMatcherStub_ != nullptr;
+        stubs_[RegExpMatcher] = generateRegExpMatcherStub(cx);
+        return stubs_[RegExpMatcher];
     }
 
-    JitCode* regExpSearcherStubNoBarrier() const {
-        return regExpSearcherStub_;
+    JitCode* regExpSearcherStubNoBarrier(uint32_t* requiredBarriersOut) const {
+        return getStubNoBarrier(RegExpSearcher, requiredBarriersOut);
     }
 
     MOZ_MUST_USE bool ensureRegExpSearcherStubExists(JSContext* cx) {
-        if (regExpSearcherStub_)
+        if (stubs_[RegExpSearcher])
             return true;
-        regExpSearcherStub_ = generateRegExpSearcherStub(cx);
-        return regExpSearcherStub_ != nullptr;
+        stubs_[RegExpSearcher] = generateRegExpSearcherStub(cx);
+        return stubs_[RegExpSearcher];
     }
 
-    JitCode* regExpTesterStubNoBarrier() const {
-        return regExpTesterStub_;
+    JitCode* regExpTesterStubNoBarrier(uint32_t* requiredBarriersOut) const {
+        return getStubNoBarrier(RegExpTester, requiredBarriersOut);
     }
 
     MOZ_MUST_USE bool ensureRegExpTesterStubExists(JSContext* cx) {
-        if (regExpTesterStub_)
+        if (stubs_[RegExpTester])
             return true;
-        regExpTesterStub_ = generateRegExpTesterStub(cx);
-        return regExpTesterStub_ != nullptr;
+        stubs_[RegExpTester] = generateRegExpTesterStub(cx);
+        return stubs_[RegExpTester];
     }
 
+    // Perform the necessary read barriers on stubs and SIMD template object
+    // described by the bitmasks passed in. This function can only be called
+    // from the active thread.
+    //
+    // The stub and template object pointers must still be valid by the time
+    // these methods are called. This is arranged by cancelling off-thread Ion
+    // compilation at the start of GC and at the start of sweeping.
+    void performStubReadBarriers(uint32_t stubsToBarrier) const;
+    void performSIMDTemplateReadBarriers(uint32_t simdTemplatesToBarrier) const;
+
     size_t sizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
+
+    bool stringsCanBeInNursery;
 };
 
 // Called from JSCompartment::discardJitCode().

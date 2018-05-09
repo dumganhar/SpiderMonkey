@@ -33,15 +33,23 @@ struct ScriptedCaller
     unsigned column;
 };
 
+struct ResponseURLs
+{
+    UniqueChars baseURL;
+    UniqueChars sourceMapURL;
+};
+
 // Describes all the parameters that control wasm compilation.
 
 struct CompileArgs : ShareableBase<CompileArgs>
 {
     Assumptions assumptions;
     ScriptedCaller scriptedCaller;
+    ResponseURLs responseURLs;
     bool baselineEnabled;
     bool debugEnabled;
     bool ionEnabled;
+    bool sharedMemoryEnabled;
     bool testTiering;
 
     CompileArgs(Assumptions&& assumptions, ScriptedCaller&& scriptedCaller)
@@ -50,6 +58,7 @@ struct CompileArgs : ShareableBase<CompileArgs>
         baselineEnabled(false),
         debugEnabled(false),
         ionEnabled(false),
+        sharedMemoryEnabled(false),
         testTiering(false)
     {}
 

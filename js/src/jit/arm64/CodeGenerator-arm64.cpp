@@ -8,8 +8,6 @@
 
 #include "mozilla/MathAlgorithms.h"
 
-#include "jscntxt.h"
-#include "jscompartment.h"
 #include "jsnum.h"
 
 #include "jit/CodeGenerator.h"
@@ -17,12 +15,13 @@
 #include "jit/JitFrames.h"
 #include "jit/MIR.h"
 #include "jit/MIRGraph.h"
+#include "vm/JSCompartment.h"
+#include "vm/JSContext.h"
 #include "vm/Shape.h"
 #include "vm/TraceLogging.h"
 
-#include "jsscriptinlines.h"
-
 #include "jit/shared/CodeGenerator-shared-inl.h"
+#include "vm/JSScript-inl.h"
 
 using namespace js;
 using namespace js::jit;
@@ -264,7 +263,7 @@ class js::jit::OutOfLineTableSwitch : public OutOfLineCodeBase<CodeGeneratorARM6
     MTableSwitch* mir_;
     Vector<CodeLabel, 8, JitAllocPolicy> codeLabels_;
 
-    void accept(CodeGeneratorARM64* codegen) {
+    void accept(CodeGeneratorARM64* codegen) override {
         codegen->visitOutOfLineTableSwitch(this);
     }
 
@@ -403,13 +402,6 @@ CodeGeneratorARM64::ToValue(LInstruction* ins, size_t pos)
 }
 
 ValueOperand
-CodeGeneratorARM64::ToOutValue(LInstruction* ins)
-{
-    Register payloadReg = ToRegister(ins->getDef(0));
-    return ValueOperand(payloadReg);
-}
-
-ValueOperand
 CodeGeneratorARM64::ToTempValue(LInstruction* ins, size_t pos)
 {
     MOZ_CRASH("CodeGeneratorARM64::ToTempValue");
@@ -445,8 +437,8 @@ CodeGeneratorARM64::visitFloat32(LFloat32* ins)
     MOZ_CRASH("visitFloat32");
 }
 
-Register
-CodeGeneratorARM64::splitTagForTest(const ValueOperand& value)
+void
+CodeGeneratorARM64::splitTagForTest(const ValueOperand& value, ScratchTagScope& tag)
 {
     MOZ_CRASH("splitTagForTest");
 }
@@ -585,24 +577,6 @@ CodeGeneratorARM64::storeElementTyped(const LAllocation* value, MIRType valueTyp
 }
 
 void
-CodeGeneratorARM64::visitGuardShape(LGuardShape* guard)
-{
-    MOZ_CRASH("visitGuardShape");
-}
-
-void
-CodeGeneratorARM64::visitGuardObjectGroup(LGuardObjectGroup* guard)
-{
-    MOZ_CRASH("visitGuardObjectGroup");
-}
-
-void
-CodeGeneratorARM64::visitGuardClass(LGuardClass* guard)
-{
-    MOZ_CRASH("CodeGeneratorARM64::visitGuardClass");
-}
-
-void
 CodeGeneratorARM64::visitInterruptCheck(LInterruptCheck* lir)
 {
     MOZ_CRASH("CodeGeneratorARM64::visitInterruptCheck");
@@ -625,18 +599,6 @@ getBase(U* mir)
 }
 
 void
-CodeGeneratorARM64::visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins)
-{
-    MOZ_CRASH("CodeGeneratorARM64::visitLoadTypedArrayElementStatic");
-}
-
-void
-CodeGeneratorARM64::visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins)
-{
-    MOZ_CRASH("CodeGeneratorARM64::visitStoreTypedArrayElementStatic");
-}
-
-void
 CodeGeneratorARM64::visitAsmJSLoadHeap(LAsmJSLoadHeap* ins)
 {
     MOZ_CRASH("visitAsmJSLoadHeap");
@@ -649,15 +611,15 @@ CodeGeneratorARM64::visitAsmJSStoreHeap(LAsmJSStoreHeap* ins)
 }
 
 void
-CodeGeneratorARM64::visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins)
+CodeGeneratorARM64::visitWasmCompareExchangeHeap(LWasmCompareExchangeHeap* ins)
 {
-    MOZ_CRASH("visitAsmJSCompareExchangeHeap");
+    MOZ_CRASH("visitWasmCompareExchangeHeap");
 }
 
 void
-CodeGeneratorARM64::visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins)
+CodeGeneratorARM64::visitWasmAtomicBinopHeap(LWasmAtomicBinopHeap* ins)
 {
-    MOZ_CRASH("visitAsmJSAtomicBinopHeap");
+    MOZ_CRASH("visitWasmAtomicBinopHeap");
 }
 
 void
@@ -728,10 +690,10 @@ CodeGeneratorARM64::visitCompareExchangeTypedArrayElement(LCompareExchangeTypedA
 
     if (lir->index()->isConstant()) {
         Address dest(elements, ToInt32(lir->index()) * width);
-        masm.compareExchangeToTypedIntArray(arrayType, dest, oldval, newval, temp, output);
+        masm.compareExchangeJS(arrayType, Synchronization::Full(), dest, oldval, newval, temp, output);
     } else {
         BaseIndex dest(elements, ToRegister(lir->index()), ScaleFromElemWidth(width));
-        masm.compareExchangeToTypedIntArray(arrayType, dest, oldval, newval, temp, output);
+        masm.compareExchangeJS(arrayType, Synchronization::Full(), dest, oldval, newval, temp, output);
     }
 }
 
@@ -749,10 +711,9 @@ CodeGeneratorARM64::visitAtomicExchangeTypedArrayElement(LAtomicExchangeTypedArr
 
     if (lir->index()->isConstant()) {
         Address dest(elements, ToInt32(lir->index()) * width);
-        masm.atomicExchangeToTypedIntArray(arrayType, dest, value, temp, output);
+        masm.atomicExchangeJS(arrayType, Synchronization::Full(), dest, value, temp, output);
     } else {
         BaseIndex dest(elements, ToRegister(lir->index()), ScaleFromElemWidth(width));
-        masm.atomicExchangeToTypedIntArray(arrayType, dest, value, temp, output);
+        masm.atomicExchangeJS(arrayType, Synchronization::Full(), dest, value, temp, output);
     }
 }
-

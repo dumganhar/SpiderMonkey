@@ -23,7 +23,9 @@
 #include "mozilla/SHA1.h"
 
 #include <algorithm>
+#include <thread>
 
+#include "util/Text.h"
 #include "wasm/WasmBaselineCompile.h"
 #include "wasm/WasmCompile.h"
 #include "wasm/WasmIonCompile.h"
@@ -48,8 +50,9 @@ CompiledCode::swap(MacroAssembler& masm)
     callSites.swap(masm.callSites());
     callSiteTargets.swap(masm.callSiteTargets());
     trapSites.swap(masm.trapSites());
+    oldTrapSites.swap(masm.oldTrapSites());
     callFarJumps.swap(masm.callFarJumps());
-    trapFarJumps.swap(masm.trapFarJumps());
+    oldTrapFarJumps.swap(masm.oldTrapFarJumps());
     memoryAccesses.swap(masm.memoryAccesses());
     symbolicAccesses.swap(masm.symbolicAccesses());
     codeLabels.swap(masm.codeLabels());
@@ -75,7 +78,7 @@ ModuleGenerator::ModuleGenerator(const CompileArgs& args, ModuleEnvironment* env
     lifo_(GENERATOR_LIFO_DEFAULT_CHUNK_SIZE),
     masmAlloc_(&lifo_),
     masm_(MacroAssembler::WasmToken(), masmAlloc_),
-    trapCodeOffsets_(),
+    oldTrapCodeOffsets_(),
     debugTrapCodeOffset_(),
     lastPatchedCallSite_(0),
     startOfUnpatchedCallsites_(0),
@@ -86,7 +89,7 @@ ModuleGenerator::ModuleGenerator(const CompileArgs& args, ModuleEnvironment* env
     finishedFuncDefs_(false)
 {
     MOZ_ASSERT(IsCompilingWasm());
-    std::fill(trapCodeOffsets_.begin(), trapCodeOffsets_.end(), 0);
+    std::fill(oldTrapCodeOffsets_.begin(), oldTrapCodeOffsets_.end(), 0);
 }
 
 ModuleGenerator::~ModuleGenerator()
@@ -158,17 +161,11 @@ ModuleGenerator::init(Metadata* maybeAsmJSMetadata)
 {
     // Perform fallible metadata, linkdata, assumption allocations.
 
+    MOZ_ASSERT(isAsmJS() == !!maybeAsmJSMetadata);
     if (maybeAsmJSMetadata) {
-        MOZ_ASSERT(isAsmJS());
-        metadataTier_ = &maybeAsmJSMetadata->metadata(tier());
         metadata_ = maybeAsmJSMetadata;
     } else {
-        MOZ_ASSERT(!isAsmJS());
-        auto metadataTier = js::MakeUnique<MetadataTier>(tier());
-        if (!metadataTier)
-            return false;
-        metadataTier_ = metadataTier.get();
-        metadata_ = js_new<Metadata>(Move(metadataTier));
+        metadata_ = js_new<Metadata>();
         if (!metadata_)
             return false;
     }
@@ -179,10 +176,25 @@ ModuleGenerator::init(Metadata* maybeAsmJSMetadata)
             return false;
     }
 
-    if (!linkData_.initTier1(tier(), *metadata_))
+    if (compileArgs_->responseURLs.baseURL) {
+        metadata_->baseURL = DuplicateString(compileArgs_->responseURLs.baseURL.get());
+        if (!metadata_->baseURL)
+            return false;
+    }
+
+    if (compileArgs_->responseURLs.sourceMapURL) {
+        metadata_->sourceMapURL = DuplicateString(compileArgs_->responseURLs.sourceMapURL.get());
+        if (!metadata_->sourceMapURL)
+            return false;
+    }
+
+    linkDataTier_ = js::MakeUnique<LinkDataTier>(tier());
+    if (!linkDataTier_)
         return false;
 
-    linkDataTier_ = &linkData_.linkData(tier());
+    metadataTier_ = js::MakeUnique<MetadataTier>(tier());
+    if (!metadataTier_)
+        return false;
 
     if (!assumptions_.clone(compileArgs_->assumptions))
         return false;
@@ -198,16 +210,16 @@ ModuleGenerator::init(Metadata* maybeAsmJSMetadata)
     // extra conservative. Note, podResizeToFit calls at the end will trim off
     // unneeded capacity.
 
-    uint32_t codeSectionSize = env_->codeSection ? env_->codeSection->size : 0;
-
-    if (!masm_.reserve(size_t(1.2 * EstimateCompiledCodeSize(tier(), codeSectionSize))))
+    size_t codeSectionSize = env_->codeSection ? env_->codeSection->size : 0;
+    size_t estimatedCodeSize = 1.2 * EstimateCompiledCodeSize(tier(), codeSectionSize);
+    if (!masm_.reserve(Min(estimatedCodeSize, MaxCodeBytesPerProcess)))
         return false;
 
     if (!metadataTier_->codeRanges.reserve(2 * env_->numFuncDefs()))
         return false;
 
-    const size_t CallSitesPerByteCode = 10;
-    if (!metadataTier_->callSites.reserve(codeSectionSize / CallSitesPerByteCode))
+    const size_t ByteCodesPerCallSite = 10;
+    if (!metadataTier_->callSites.reserve(codeSectionSize / ByteCodesPerCallSite))
         return false;
 
     const size_t MemoryAccessesPerByteCode = 10;
@@ -277,23 +289,37 @@ ModuleGenerator::init(Metadata* maybeAsmJSMetadata)
     // Metadata needs to be sorted (to allow O(log(n)) lookup at runtime) and
     // deduplicated, so use an intermediate vector to sort and de-duplicate.
 
-    Uint32Vector exportedFuncs;
+    static_assert((uint64_t(MaxFuncs) << 1) < uint64_t(UINT32_MAX), "bit packing won't work");
+
+    class ExportedFunc {
+        uint32_t value;
+      public:
+        ExportedFunc(uint32_t index, bool isExplicit) : value((index << 1) | (isExplicit?1:0)) {}
+        uint32_t index() const { return value >> 1; }
+        bool isExplicit() const { return value & 0x1; }
+        bool operator<(const ExportedFunc& other) const { return index() < other.index(); }
+        bool operator==(const ExportedFunc& other) const { return index() == other.index(); }
+    };
+
+    Vector<ExportedFunc, 8, SystemAllocPolicy> exportedFuncs;
 
     for (const Export& exp : env_->exports) {
         if (exp.kind() == DefinitionKind::Function) {
-            if (!exportedFuncs.append(exp.funcIndex()))
+            if (!exportedFuncs.emplaceBack(exp.funcIndex(), true))
                 return false;
         }
     }
 
     for (ElemSegment& elems : env_->elemSegments) {
         if (env_->tables[elems.tableIndex].external) {
-            if (!exportedFuncs.appendAll(elems.elemFuncIndices))
+            if (!exportedFuncs.reserve(exportedFuncs.length() + elems.elemFuncIndices.length()))
                 return false;
+            for (uint32_t funcIndex : elems.elemFuncIndices)
+                exportedFuncs.infallibleEmplaceBack(funcIndex, false);
         }
     }
 
-    if (env_->startFuncIndex && !exportedFuncs.append(*env_->startFuncIndex))
+    if (env_->startFuncIndex && !exportedFuncs.emplaceBack(*env_->startFuncIndex, true))
         return false;
 
     std::sort(exportedFuncs.begin(), exportedFuncs.end());
@@ -303,11 +329,12 @@ ModuleGenerator::init(Metadata* maybeAsmJSMetadata)
     if (!metadataTier_->funcExports.reserve(exportedFuncs.length()))
         return false;
 
-    for (uint32_t funcIndex : exportedFuncs) {
+    for (const ExportedFunc& funcIndex : exportedFuncs) {
         Sig sig;
-        if (!sig.clone(*env_->funcSigs[funcIndex]))
+        if (!sig.clone(*env_->funcSigs[funcIndex.index()]))
             return false;
-        metadataTier_->funcExports.infallibleEmplaceBack(Move(sig), funcIndex);
+        metadataTier_->funcExports.infallibleEmplaceBack(Move(sig), funcIndex.index(),
+                                                         funcIndex.isExplicit());
     }
 
     // Determine whether parallel or sequential compilation is to be used and
@@ -380,7 +407,7 @@ InRange(uint32_t caller, uint32_t callee)
 }
 
 typedef HashMap<uint32_t, uint32_t, DefaultHasher<uint32_t>, SystemAllocPolicy> OffsetMap;
-typedef EnumeratedArray<Trap, Trap::Limit, Maybe<uint32_t>> TrapOffsetArray;
+typedef EnumeratedArray<Trap, Trap::Limit, Maybe<uint32_t>> TrapMaybeOffsetArray;
 
 bool
 ModuleGenerator::linkCallSites()
@@ -399,7 +426,7 @@ ModuleGenerator::linkCallSites()
     if (!existingCallFarJumps.init())
         return false;
 
-    TrapOffsetArray existingTrapFarJumps;
+    TrapMaybeOffsetArray existingTrapFarJumps;
 
     for (; lastPatchedCallSite_ < metadataTier_->callSites.length(); lastPatchedCallSite_++) {
         const CallSite& callSite = metadataTier_->callSites[lastPatchedCallSite_];
@@ -436,14 +463,14 @@ ModuleGenerator::linkCallSites()
             masm_.patchCall(callerOffset, p->value());
             break;
           }
-          case CallSiteDesc::TrapExit: {
+          case CallSiteDesc::OldTrapExit: {
             if (!existingTrapFarJumps[target.trap()]) {
-                // See MacroAssembler::wasmEmitTrapOutOfLineCode for why we must
+                // See MacroAssembler::wasmEmitOldTrapOutOfLineCode for why we must
                 // reload the TLS register on this path.
                 Offsets offsets;
                 offsets.begin = masm_.currentOffset();
                 masm_.loadPtr(Address(FramePointer, offsetof(Frame, tls)), WasmTlsReg);
-                if (!trapFarJumps_.emplaceBack(target.trap(), masm_.farJumpWithPatch()))
+                if (!oldTrapFarJumps_.emplaceBack(target.trap(), masm_.farJumpWithPatch()))
                     return false;
                 offsets.end = masm_.currentOffset();
                 if (masm_.oom())
@@ -495,7 +522,11 @@ ModuleGenerator::noteCodeRange(uint32_t codeRangeIndex, const CodeRange& codeRan
         funcToCodeRange_[codeRange.funcIndex()] = codeRangeIndex;
         break;
       case CodeRange::InterpEntry:
-        metadataTier_->lookupFuncExport(codeRange.funcIndex()).initInterpEntryOffset(codeRange.begin());
+        metadataTier_->lookupFuncExport(codeRange.funcIndex())
+            .initEagerInterpEntryOffset(codeRange.begin());
+        break;
+      case CodeRange::JitEntry:
+        // Nothing to do: jit entries are linked in the jump tables.
         break;
       case CodeRange::ImportJitExit:
         metadataTier_->funcImports[codeRange.funcIndex()].initJitExitOffset(codeRange.begin());
@@ -503,9 +534,9 @@ ModuleGenerator::noteCodeRange(uint32_t codeRangeIndex, const CodeRange& codeRan
       case CodeRange::ImportInterpExit:
         metadataTier_->funcImports[codeRange.funcIndex()].initInterpExitOffset(codeRange.begin());
         break;
-      case CodeRange::TrapExit:
-        MOZ_ASSERT(!trapCodeOffsets_[codeRange.trap()]);
-        trapCodeOffsets_[codeRange.trap()] = codeRange.begin();
+      case CodeRange::OldTrapExit:
+        MOZ_ASSERT(!oldTrapCodeOffsets_[codeRange.trap()]);
+        oldTrapCodeOffsets_[codeRange.trap()] = codeRange.begin();
         break;
       case CodeRange::DebugTrap:
         MOZ_ASSERT(!debugTrapCodeOffset_);
@@ -522,6 +553,10 @@ ModuleGenerator::noteCodeRange(uint32_t codeRangeIndex, const CodeRange& codeRan
       case CodeRange::Interrupt:
         MOZ_ASSERT(!linkDataTier_->interruptOffset);
         linkDataTier_->interruptOffset = codeRange.begin();
+        break;
+      case CodeRange::TrapExit:
+        MOZ_ASSERT(!linkDataTier_->trapOffset);
+        linkDataTier_->trapOffset = codeRange.begin();
         break;
       case CodeRange::Throw:
         // Jumped to by other stubs, so nothing to do.
@@ -580,10 +615,16 @@ ModuleGenerator::linkCompiledCode(const CompiledCode& code)
     if (!callSiteTargets_.appendAll(code.callSiteTargets))
         return false;
 
-    MOZ_ASSERT(code.trapSites.empty());
+    for (Trap trap : MakeEnumeratedRange(Trap::Limit)) {
+        auto trapSiteOp = [=](uint32_t, TrapSite* ts) { ts->offsetBy(offsetInModule); };
+        if (!AppendForEach(&metadataTier_->trapSites[trap], code.trapSites[trap], trapSiteOp))
+            return false;
+    }
 
-    auto trapFarJumpOp = [=](uint32_t, TrapFarJump* tfj) { tfj->offsetBy(offsetInModule); };
-    if (!AppendForEach(&trapFarJumps_, code.trapFarJumps, trapFarJumpOp))
+    MOZ_ASSERT(code.oldTrapSites.empty());
+
+    auto trapFarJumpOp = [=](uint32_t, OldTrapFarJump* tfj) { tfj->offsetBy(offsetInModule); };
+    if (!AppendForEach(&oldTrapFarJumps_, code.oldTrapFarJumps, trapFarJumpOp))
         return false;
 
     auto callFarJumpOp = [=](uint32_t, CallFarJump* cfj) { cfj->offsetBy(offsetInModule); };
@@ -604,6 +645,9 @@ ModuleGenerator::linkCompiledCode(const CompiledCode& code)
         LinkDataTier::InternalLink link;
         link.patchAtOffset = offsetInModule + codeLabel.patchAt().offset();
         link.targetOffset = offsetInModule + codeLabel.target().offset();
+#ifdef JS_CODELABEL_LINKMODE
+        link.mode = codeLabel.linkMode();
+#endif
         if (!linkDataTier_->internalLinks.append(link))
             return false;
     }
@@ -759,7 +803,7 @@ ModuleGenerator::compileFuncDef(uint32_t funcIndex, uint32_t lineOrBytecode,
     }
 
     batchedBytecode_ += funcBytecodeLength;
-    MOZ_ASSERT(batchedBytecode_ <= MaxModuleBytes);
+    MOZ_ASSERT(batchedBytecode_ <= MaxCodeSectionBytes);
     return batchedBytecode_ <= threshold || launchBatchCompile();
 }
 
@@ -788,8 +832,8 @@ ModuleGenerator::finishCode()
     for (CallFarJump far : callFarJumps_)
         masm_.patchFarJump(far.jump, funcCodeRange(far.funcIndex).funcNormalEntry());
 
-    for (TrapFarJump far : trapFarJumps_)
-        masm_.patchFarJump(far.jump, trapCodeOffsets_[far.trap]);
+    for (OldTrapFarJump far : oldTrapFarJumps_)
+        masm_.patchFarJump(far.jump, oldTrapCodeOffsets_[far.trap]);
 
     for (CodeOffset farJump : debugTrapFarJumps_)
         masm_.patchFarJump(farJump, debugTrapCodeOffset_);
@@ -799,7 +843,8 @@ ModuleGenerator::finishCode()
     MOZ_ASSERT(masm_.callSites().empty());
     MOZ_ASSERT(masm_.callSiteTargets().empty());
     MOZ_ASSERT(masm_.trapSites().empty());
-    MOZ_ASSERT(masm_.trapFarJumps().empty());
+    MOZ_ASSERT(masm_.oldTrapSites().empty());
+    MOZ_ASSERT(masm_.oldTrapFarJumps().empty());
     MOZ_ASSERT(masm_.callFarJumps().empty());
     MOZ_ASSERT(masm_.memoryAccesses().empty());
     MOZ_ASSERT(masm_.symbolicAccesses().empty());
@@ -812,19 +857,32 @@ ModuleGenerator::finishCode()
 bool
 ModuleGenerator::finishMetadata(const ShareableBytes& bytecode)
 {
+    // Assert all sorted metadata is sorted.
 #ifdef DEBUG
-    // Assert CodeRanges are sorted.
-    uint32_t lastEnd = 0;
+    uint32_t last = 0;
     for (const CodeRange& codeRange : metadataTier_->codeRanges) {
-        MOZ_ASSERT(codeRange.begin() >= lastEnd);
-        lastEnd = codeRange.end();
+        MOZ_ASSERT(codeRange.begin() >= last);
+        last = codeRange.end();
     }
 
-    // Assert debugTrapFarJumpOffsets are sorted.
-    uint32_t lastOffset = 0;
+    last = 0;
+    for (const CallSite& callSite : metadataTier_->callSites) {
+        MOZ_ASSERT(callSite.returnAddressOffset() >= last);
+        last = callSite.returnAddressOffset();
+    }
+
+    for (Trap trap : MakeEnumeratedRange(Trap::Limit)) {
+        last = 0;
+        for (const TrapSite& trapSite : metadataTier_->trapSites[trap]) {
+            MOZ_ASSERT(trapSite.pcOffset >= last);
+            last = trapSite.pcOffset;
+        }
+    }
+
+    last = 0;
     for (uint32_t debugTrapFarJumpOffset : metadataTier_->debugTrapFarJumpOffsets) {
-        MOZ_ASSERT(debugTrapFarJumpOffset >= lastOffset);
-        lastOffset = debugTrapFarJumpOffset;
+        MOZ_ASSERT(debugTrapFarJumpOffset >= last);
+        last = debugTrapFarJumpOffset;
     }
 #endif
 
@@ -849,7 +907,7 @@ ModuleGenerator::finishMetadata(const ShareableBytes& bytecode)
 
     metadataTier_->memoryAccesses.podResizeToFit();
     metadataTier_->codeRanges.podResizeToFit();
-    metadataTier_->callSites.podResizeToFit();
+    metadataTier_->trapSites.podResizeToFit();
     metadataTier_->debugTrapFarJumpOffsets.podResizeToFit();
     metadataTier_->debugFuncToCodeRange.podResizeToFit();
 
@@ -857,7 +915,7 @@ ModuleGenerator::finishMetadata(const ShareableBytes& bytecode)
     // now that every function has a code range.
 
     for (FuncExport& fe : metadataTier_->funcExports)
-        fe.initCodeRangeIndex(funcToCodeRange_[fe.funcIndex()]);
+        fe.initInterpCodeRangeIndex(funcToCodeRange_[fe.funcIndex()]);
 
     for (ElemSegment& elems : env_->elemSegments) {
         Uint32Vector& codeRangeIndices = elems.elemCodeRangeIndices(tier());
@@ -897,7 +955,7 @@ ModuleGenerator::finishMetadata(const ShareableBytes& bytecode)
     return true;
 }
 
-UniqueCodeSegment
+UniqueModuleSegment
 ModuleGenerator::finish(const ShareableBytes& bytecode)
 {
     MOZ_ASSERT(finishedFuncDefs_);
@@ -932,27 +990,8 @@ ModuleGenerator::finish(const ShareableBytes& bytecode)
     if (!finishMetadata(bytecode))
         return nullptr;
 
-    return CodeSegment::create(tier(), masm_, bytecode, *linkDataTier_, *metadata_);
-}
-
-UniqueJumpTable
-ModuleGenerator::createJumpTable(const CodeSegment& codeSegment)
-{
-    MOZ_ASSERT(mode() == CompileMode::Tier1);
-    MOZ_ASSERT(!isAsmJS());
-
-    uint32_t tableSize = env_->numFuncs();
-    UniqueJumpTable jumpTable(js_pod_calloc<void*>(tableSize));
-    if (!jumpTable)
-        return nullptr;
-
-    uint8_t* codeBase = codeSegment.base();
-    for (const CodeRange& codeRange : metadataTier_->codeRanges) {
-        if (codeRange.isFunction())
-            jumpTable[codeRange.funcIndex()] = codeBase + codeRange.funcTierEntry();
-    }
-
-    return jumpTable;
+    return ModuleSegment::create(tier(), masm_, bytecode, *linkDataTier_, *metadata_,
+                                 metadataTier_->codeRanges);
 }
 
 SharedModule
@@ -960,16 +999,13 @@ ModuleGenerator::finishModule(const ShareableBytes& bytecode)
 {
     MOZ_ASSERT(mode() == CompileMode::Once || mode() == CompileMode::Tier1);
 
-    UniqueCodeSegment codeSegment = finish(bytecode);
-    if (!codeSegment)
+    UniqueModuleSegment moduleSegment = finish(bytecode);
+    if (!moduleSegment)
         return nullptr;
 
-    UniqueJumpTable maybeJumpTable;
-    if (mode() == CompileMode::Tier1) {
-        maybeJumpTable = createJumpTable(*codeSegment);
-        if (!maybeJumpTable)
-            return nullptr;
-    }
+    JumpTables jumpTables;
+    if (!jumpTables.init(mode(), *moduleSegment, metadataTier_->codeRanges))
+        return nullptr;
 
     UniqueConstBytes maybeDebuggingBytes;
     if (env_->debugEnabled()) {
@@ -983,14 +1019,18 @@ ModuleGenerator::finishModule(const ShareableBytes& bytecode)
             return nullptr;
     }
 
-    SharedCode code = js_new<Code>(Move(codeSegment), *metadata_, Move(maybeJumpTable));
+    auto codeTier = js::MakeUnique<CodeTier>(tier(), Move(metadataTier_), Move(moduleSegment));
+    if (!codeTier)
+        return nullptr;
+
+    SharedCode code = js_new<Code>(Move(codeTier), *metadata_, Move(jumpTables));
     if (!code)
         return nullptr;
 
     SharedModule module(js_new<Module>(Move(assumptions_),
                                        *code,
                                        Move(maybeDebuggingBytes),
-                                       Move(linkData_),
+                                       LinkData(Move(linkDataTier_)),
                                        Move(env_->imports),
                                        Move(env_->exports),
                                        Move(env_->dataSegments),
@@ -1015,13 +1055,19 @@ ModuleGenerator::finishTier2(Module& module)
     if (cancelled_ && *cancelled_)
         return false;
 
-    UniqueCodeSegment codeSegment = finish(module.bytecode());
-    if (!codeSegment)
+    UniqueModuleSegment moduleSegment = finish(module.bytecode());
+    if (!moduleSegment)
         return false;
 
-    module.finishTier2(linkData_.takeLinkData(tier()),
-                       metadata_->takeMetadata(tier()),
-                       Move(codeSegment),
-                       env_);
-    return true;
+    auto tier2 = js::MakeUnique<CodeTier>(tier(), Move(metadataTier_), Move(moduleSegment));
+    if (!tier2)
+        return false;
+
+    if (MOZ_UNLIKELY(JitOptions.wasmDelayTier2)) {
+        // Introduce an artificial delay when testing wasmDelayTier2, since we
+        // want to exercise both tier1 and tier2 code in this case.
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    return module.finishTier2(Move(linkDataTier_), Move(tier2), env_);
 }

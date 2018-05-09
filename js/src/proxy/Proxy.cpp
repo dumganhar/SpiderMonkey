@@ -11,18 +11,17 @@
 #include <string.h>
 
 #include "jsapi.h"
-#include "jscntxt.h"
-#include "jsfun.h"
-#include "jswrapper.h"
 
+#include "js/Wrapper.h"
 #include "proxy/DeadObjectProxy.h"
 #include "proxy/ScriptedProxyHandler.h"
+#include "vm/JSContext.h"
+#include "vm/JSFunction.h"
 #include "vm/WrapperObject.h"
 
-#include "jsatominlines.h"
-#include "jsobjinlines.h"
-
 #include "gc/Marking-inl.h"
+#include "vm/JSAtom-inl.h"
+#include "vm/JSObject-inl.h"
 #include "vm/NativeObject-inl.h"
 
 using namespace js;
@@ -467,7 +466,7 @@ Proxy::enumerate(JSContext* cx, HandleObject proxy)
         if (!GetPrototype(cx, proxy, &proto))
             return nullptr;
         if (!proto)
-            return EnumeratedIdVectorToIterator(cx, proxy, 0, props);
+            return EnumeratedIdVectorToIterator(cx, proxy, props);
         assertSameCompartment(cx, proxy, proto);
 
         AutoIdVector protoProps(cx);
@@ -475,7 +474,7 @@ Proxy::enumerate(JSContext* cx, HandleObject proxy)
             return nullptr;
         if (!AppendUnique(cx, props, protoProps))
             return nullptr;
-        return EnumeratedIdVectorToIterator(cx, proxy, 0, props);
+        return EnumeratedIdVectorToIterator(cx, proxy, props);
     }
 
     AutoEnterPolicy policy(cx, handler, proxy, JSID_VOIDHANDLE,
@@ -486,7 +485,7 @@ Proxy::enumerate(JSContext* cx, HandleObject proxy)
     if (!policy.allowed()) {
         if (!policy.returnValue())
             return nullptr;
-        return NewEmptyPropertyIterator(cx, 0);
+        return NewEmptyPropertyIterator(cx);
     }
     return handler->enumerate(cx, proxy);
 }
@@ -686,7 +685,7 @@ ProxyObject::trace(JSTracer* trc, JSObject* obj)
 {
     ProxyObject* proxy = &obj->as<ProxyObject>();
 
-    TraceEdge(trc, &proxy->shape_, "ProxyObject_shape");
+    TraceEdge(trc, proxy->shapePtr(), "ProxyObject_shape");
 
 #ifdef DEBUG
     if (TlsContext.get()->isStrictProxyCheckingEnabled() && proxy->is<WrapperObject>()) {

@@ -132,25 +132,6 @@ TOUCH ?= touch
 
 PYTHON_PATH = $(PYTHON) $(topsrcdir)/config/pythonpath.py
 
-# determine debug-related options
-_DEBUG_ASFLAGS :=
-
-ifneq (,$(MOZ_DEBUG)$(MOZ_DEBUG_SYMBOLS))
-  ifeq ($(AS),$(YASM))
-    ifeq ($(OS_ARCH)_$(GNU_CC),WINNT_)
-      _DEBUG_ASFLAGS += -g cv8
-    else
-      ifneq ($(OS_ARCH),Darwin)
-        _DEBUG_ASFLAGS += -g dwarf2
-      endif
-    endif
-  else
-    _DEBUG_ASFLAGS += $(MOZ_DEBUG_FLAGS)
-  endif
-endif
-
-ASFLAGS += $(_DEBUG_ASFLAGS)
-
 #
 # Build using PIC by default
 #
@@ -186,8 +167,9 @@ endif
 endif # MOZ_PROFILE_USE
 endif # NO_PROFILE_GUIDED_OPTIMIZE
 
+LOCALE_TOPDIR ?= $(topsrcdir)
 MAKE_JARS_FLAGS = \
-	-t $(topsrcdir) \
+	-t $(LOCALE_TOPDIR) \
 	-f $(MOZ_JAR_MAKER_FILE_FORMAT) \
 	$(NULL)
 
@@ -196,12 +178,6 @@ MAKE_JARS_FLAGS += -e
 endif
 
 TAR_CREATE_FLAGS = -chf
-
-#
-# Personal makefile customizations go in these optional make include files.
-#
-MY_CONFIG	:= $(DEPTH)/config/myconfig.mk
-MY_RULES	:= $(DEPTH)/config/myrules.mk
 
 #
 # Default command macros; can be overridden in <arch>.mk.
@@ -223,10 +199,13 @@ COMPILE_CFLAGS	= $(COMPUTED_CFLAGS) $(PGO_CFLAGS) $(_DEPEND_CFLAGS) $(MK_COMPILE
 COMPILE_CXXFLAGS = $(COMPUTED_CXXFLAGS) $(PGO_CFLAGS) $(_DEPEND_CFLAGS) $(MK_COMPILE_DEFINES)
 COMPILE_CMFLAGS = $(OS_COMPILE_CMFLAGS) $(MOZBUILD_CMFLAGS)
 COMPILE_CMMFLAGS = $(OS_COMPILE_CMMFLAGS) $(MOZBUILD_CMMFLAGS)
-ASFLAGS += $(MOZBUILD_ASFLAGS)
+ASFLAGS = $(COMPUTED_ASFLAGS)
+SFLAGS = $(COMPUTED_SFLAGS)
 
 HOST_CFLAGS = $(COMPUTED_HOST_CFLAGS) $(_DEPEND_CFLAGS)
 HOST_CXXFLAGS = $(COMPUTED_HOST_CXXFLAGS) $(_DEPEND_CFLAGS)
+HOST_C_LDFLAGS = $(COMPUTED_HOST_C_LDFLAGS)
+HOST_CXX_LDFLAGS = $(COMPUTED_HOST_CXX_LDFLAGS)
 
 # We only add color flags if neither the flag to disable color
 # (e.g. "-fno-color-diagnostics" nor a flag to control color
@@ -311,11 +290,7 @@ endif
 endif
 endif
 
-#
-# Include any personal overrides the user might think are needed.
-#
 -include $(topsrcdir)/$(MOZ_BUILD_APP)/app-config.mk
--include $(MY_CONFIG)
 
 ######################################################################
 
@@ -363,6 +338,9 @@ sysinstall_cmd = install_cmd
 # MOZ_UI_LOCALE directly, but use an intermediate variable that can be
 # overridden by the command line. (Besides, AB_CD is prettier).
 AB_CD = $(MOZ_UI_LOCALE)
+
+include $(MOZILLA_DIR)/config/AB_rCD.mk
+
 # Many locales directories want this definition.
 ACDEFINES += -DAB_CD=$(AB_CD)
 
@@ -370,14 +348,18 @@ ifndef L10NBASEDIR
   L10NBASEDIR = $(error L10NBASEDIR not defined by configure)
 endif
 
-EXPAND_LOCALE_SRCDIR = $(if $(filter en-US,$(AB_CD)),$(topsrcdir)/$(1)/en-US,$(or $(realpath $(L10NBASEDIR)),$(abspath $(L10NBASEDIR)))/$(AB_CD)/$(subst /locales,,$(1)))
+EXPAND_LOCALE_SRCDIR = $(if $(filter en-US,$(AB_CD)),$(LOCALE_TOPDIR)/$(1)/en-US,$(or $(realpath $(L10NBASEDIR)),$(abspath $(L10NBASEDIR)))/$(AB_CD)/$(subst /locales,,$(1)))
 
 ifdef relativesrcdir
-LOCALE_SRCDIR ?= $(call EXPAND_LOCALE_SRCDIR,$(relativesrcdir))
+LOCALE_RELATIVEDIR ?= $(relativesrcdir)
+endif
+
+ifdef LOCALE_RELATIVEDIR
+LOCALE_SRCDIR ?= $(call EXPAND_LOCALE_SRCDIR,$(LOCALE_RELATIVEDIR))
 endif
 
 ifdef relativesrcdir
-MAKE_JARS_FLAGS += --relativesrcdir=$(relativesrcdir)
+MAKE_JARS_FLAGS += --relativesrcdir=$(LOCALE_RELATIVEDIR)
 ifneq (en-US,$(AB_CD))
 ifdef IS_LANGUAGE_REPACK
 MAKE_JARS_FLAGS += --locale-mergedir=$(REAL_LOCALE_MERGEDIR)
@@ -394,20 +376,24 @@ endif # ! relativesrcdir
 
 ifdef IS_LANGUAGE_REPACK
 MERGE_FILE = $(firstword \
-  $(wildcard $(REAL_LOCALE_MERGEDIR)/$(subst /locales,,$(relativesrcdir))/$(1)) \
+  $(wildcard $(REAL_LOCALE_MERGEDIR)/$(subst /locales,,$(LOCALE_RELATIVEDIR))/$(1)) \
   $(wildcard $(LOCALE_SRCDIR)/$(1)) \
   $(srcdir)/en-US/$(1) )
+# Like MERGE_FILE, but with the specified relative source directory
+# $(2) replacing $(srcdir).  It's expected that $(2) will include
+# '/locales' but not '/locales/en-US'.
+#
+# MERGE_RELATIVE_FILE and MERGE_FILE could be -- ahem -- merged by
+# making the second argument optional, but that expression makes for
+# difficult to read Make.
+MERGE_RELATIVE_FILE = $(firstword \
+  $(wildcard $(REAL_LOCALE_MERGEDIR)/$(subst /locales,,$(2))/$(1)) \
+  $(wildcard $(call EXPAND_LOCALE_SRCDIR,$(2))/$(1)) \
+  $(topsrcdir)/$(2)/en-US/$(1) )
 else
 MERGE_FILE = $(LOCALE_SRCDIR)/$(1)
+MERGE_RELATIVE_FILE = $(call EXPAND_LOCALE_SRCDIR,$(2))/$(1)
 endif
-MERGE_FILES = $(foreach f,$(1),$(call MERGE_FILE,$(f)))
-
-# These marcros are similar to MERGE_FILE, but no merging, and en-US first.
-# They're used for searchplugins, for example.
-EN_US_OR_L10N_FILE = $(firstword \
-  $(wildcard $(srcdir)/en-US/$(1)) \
-  $(LOCALE_SRCDIR)/$(1) )
-EN_US_OR_L10N_FILES = $(foreach f,$(1),$(call EN_US_OR_L10N_FILE,$(f)))
 
 ifneq (WINNT,$(OS_ARCH))
 RUN_TEST_PROGRAM = $(DIST)/bin/run-mozilla.sh
@@ -434,7 +420,7 @@ EXPAND_LIBS_GEN = $(PYTHON) $(MOZILLA_DIR)/config/expandlibs_gen.py
 EXPAND_AR = $(EXPAND_LIBS_EXEC) --extract -- $(AR)
 EXPAND_CC = $(EXPAND_LIBS_EXEC) --uselist -- $(CC)
 EXPAND_CCC = $(EXPAND_LIBS_EXEC) --uselist -- $(CCC)
-EXPAND_LINK = $(EXPAND_LIBS_EXEC) --uselist -- $(LINK)
+EXPAND_LINK = $(EXPAND_LIBS_EXEC) --uselist -- $(LINKER)
 EXPAND_MKSHLIB_ARGS = --uselist
 ifdef SYMBOL_ORDER
 EXPAND_MKSHLIB_ARGS += --symbol-order $(SYMBOL_ORDER)

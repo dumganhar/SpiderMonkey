@@ -15,6 +15,7 @@
 #include "mozilla/Scoped.h"
 #include "mozilla/TemplateLib.h"
 #include "mozilla/UniquePtr.h"
+#include "mozilla/WrappingOperations.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -112,7 +113,11 @@ inline uint32_t GetThreadType(void) { return 0; }
 # if defined(DEBUG) || defined(JS_OOM_BREAKPOINT)
 
 #ifdef JS_OOM_BREAKPOINT
+#  if defined(_MSC_VER)
+static MOZ_NEVER_INLINE void js_failedAllocBreakpoint() { __asm { }; }
+#  else
 static MOZ_NEVER_INLINE void js_failedAllocBreakpoint() { asm(""); }
+#  endif
 #define JS_OOM_CALL_BP_FUNC() js_failedAllocBreakpoint()
 #else
 #define JS_OOM_CALL_BP_FUNC() do {} while(0)
@@ -693,7 +698,7 @@ ScrambleHashCode(HashNumber h)
      * are stored in a hash table; see Knuth for details.
      */
     static const HashNumber goldenRatio = 0x9E3779B9U;
-    return h * goldenRatio;
+    return mozilla::WrappingMultiply(h, goldenRatio);
 }
 
 } /* namespace detail */

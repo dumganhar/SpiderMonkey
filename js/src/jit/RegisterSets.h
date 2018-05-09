@@ -25,7 +25,7 @@ struct AnyRegister {
     Code code_;
 
   public:
-    AnyRegister() = default;
+    AnyRegister() : code_(Invalid) {}
 
     explicit AnyRegister(Register gpr) {
         code_ = gpr.code();
@@ -40,6 +40,7 @@ struct AnyRegister {
         return r;
     }
     bool isFloat() const {
+        MOZ_ASSERT(isValid());
         return code_ >= Registers::Total;
     }
     Register gpr() const {
@@ -51,15 +52,18 @@ struct AnyRegister {
         return FloatRegister::FromCode(code_ - Registers::Total);
     }
     bool operator ==(AnyRegister other) const {
+        // We don't need the operands to be valid to test for equality.
         return code_ == other.code_;
     }
     bool operator !=(AnyRegister other) const {
+        // We don't need the operands to be valid to test for equality.
         return code_ != other.code_;
     }
     const char* name() const {
         return isFloat() ? fpu().name() : gpr().name();
     }
     Code code() const {
+        MOZ_ASSERT(isValid());
         return code_;
     }
     bool volatile_() const {
@@ -99,7 +103,9 @@ struct AnyRegister {
             return true;
         return false;
     }
-
+    bool isValid() const {
+        return code_ != Invalid;
+    }
 };
 
 // Registers to hold a boxed value. Uses one register on 64 bit
@@ -124,13 +130,13 @@ class ValueOperand
     bool aliases(Register reg) const {
         return type_ == reg || payload_ == reg;
     }
-    Register scratchReg() const {
+    Register payloadOrValueReg() const {
         return payloadReg();
     }
-    bool operator==(const ValueOperand& o) const {
+    constexpr bool operator==(const ValueOperand& o) const {
         return type_ == o.type_ && payload_ == o.payload_;
     }
-    bool operator!=(const ValueOperand& o) const {
+    constexpr bool operator!=(const ValueOperand& o) const {
         return !(*this == o);
     }
 
@@ -148,16 +154,20 @@ class ValueOperand
     bool aliases(Register reg) const {
         return value_ == reg;
     }
-    Register scratchReg() const {
+    Register payloadOrValueReg() const {
         return valueReg();
     }
-    bool operator==(const ValueOperand& o) const {
+    constexpr bool operator==(const ValueOperand& o) const {
         return value_ == o.value_;
     }
-    bool operator!=(const ValueOperand& o) const {
+    constexpr bool operator!=(const ValueOperand& o) const {
         return !(*this == o);
     }
 #endif
+
+    Register scratchReg() const {
+        return payloadOrValueReg();
+    }
 
     ValueOperand() = default;
 };
@@ -169,7 +179,7 @@ class TypedOrValueRegister
     MIRType type_;
 
     union U {
-        AnyRegister typed;
+        AnyRegister::Code typed;
         ValueOperand value;
     } data;
 
@@ -180,7 +190,7 @@ class TypedOrValueRegister
     TypedOrValueRegister(MIRType type, AnyRegister reg)
       : type_(type)
     {
-        data.typed = reg;
+        data.typed = reg.code();
     }
 
     MOZ_IMPLICIT TypedOrValueRegister(ValueOperand value)
@@ -203,7 +213,7 @@ class TypedOrValueRegister
 
     AnyRegister typedReg() const {
         MOZ_ASSERT(hasTyped());
-        return data.typed;
+        return AnyRegister::FromCode(data.typed);
     }
 
     ValueOperand valueReg() const {
@@ -226,13 +236,13 @@ class ConstantOrRegister
 
     // Space to hold either a Value or a TypedOrValueRegister.
     union U {
-        Value constant;
+        JS::UninitializedValue constant;
         TypedOrValueRegister reg;
     } data;
 
-    const Value& dataValue() const {
+    Value dataValue() const {
         MOZ_ASSERT(constant());
-        return data.constant;
+        return data.constant.asValueRef();
     }
     void setDataValue(const Value& value) {
         MOZ_ASSERT(constant());
@@ -268,47 +278,12 @@ class ConstantOrRegister
         return constant_;
     }
 
-    const Value& value() const {
+    Value value() const {
         return dataValue();
     }
 
     const TypedOrValueRegister& reg() const {
         return dataReg();
-    }
-};
-
-struct RegisterOrInt32Constant {
-    bool isRegister_;
-    union {
-        Register reg_;
-        int32_t constant_;
-    };
-
-    explicit RegisterOrInt32Constant(Register reg)
-      : isRegister_(true), reg_(reg)
-    { }
-
-    explicit RegisterOrInt32Constant(int32_t index)
-      : isRegister_(false), constant_(index)
-    { }
-
-    inline void bumpConstant(int diff) {
-        MOZ_ASSERT(!isRegister_);
-        constant_ += diff;
-    }
-    inline Register reg() const {
-        MOZ_ASSERT(isRegister_);
-        return reg_;
-    }
-    inline int32_t constant() const {
-        MOZ_ASSERT(!isRegister_);
-        return constant_;
-    }
-    inline bool isRegister() const {
-        return isRegister_;
-    }
-    inline bool isConstant() const {
-        return !isRegister_;
     }
 };
 
@@ -499,7 +474,6 @@ class RegisterSet {
     bool operator ==(const RegisterSet& other) const {
         return other.gpr_ == gpr_ && other.fpu_ == fpu_;
     }
-
 };
 
 // There are 2 use cases for register sets:
@@ -1305,7 +1279,8 @@ class ABIArg
         GPR_PAIR,
 #endif
         FPU,
-        Stack
+        Stack,
+        Uninitialized = -1
     };
 
   private:
@@ -1317,7 +1292,7 @@ class ABIArg
     } u;
 
   public:
-    ABIArg() : kind_(Kind(-1)) { u.offset_ = -1; }
+    ABIArg() : kind_(Uninitialized) { u.offset_ = -1; }
     explicit ABIArg(Register gpr) : kind_(GPR) { u.gpr_ = gpr.code(); }
     explicit ABIArg(Register gprLow, Register gprHigh)
     {
@@ -1333,9 +1308,12 @@ class ABIArg
     explicit ABIArg(FloatRegister fpu) : kind_(FPU) { u.fpu_ = fpu.code(); }
     explicit ABIArg(uint32_t offset) : kind_(Stack) { u.offset_ = offset; }
 
-    Kind kind() const { return kind_; }
+    Kind kind() const {
+        MOZ_ASSERT(kind_ != Uninitialized);
+        return kind_;
+    }
 #ifdef JS_CODEGEN_REGISTER_PAIR
-    bool isGeneralRegPair() const { return kind_ == GPR_PAIR; }
+    bool isGeneralRegPair() const { return kind() == GPR_PAIR; }
 #else
     bool isGeneralRegPair() const { return false; }
 #endif
@@ -1369,22 +1347,22 @@ class ABIArg
     }
 
     bool argInRegister() const { return kind() != Stack; }
-    AnyRegister reg() const { return kind_ == GPR ? AnyRegister(gpr()) : AnyRegister(fpu()); }
+    AnyRegister reg() const { return kind() == GPR ? AnyRegister(gpr()) : AnyRegister(fpu()); }
 
     bool operator==(const ABIArg& rhs) const {
         if (kind_ != rhs.kind_)
             return false;
 
-        switch((int8_t)kind_) {
+        switch(kind_) {
             case GPR:   return u.gpr_ == rhs.u.gpr_;
 #if defined(JS_CODEGEN_REGISTER_PAIR)
             case GPR_PAIR: return u.gpr_ == rhs.u.gpr_;
 #endif
             case FPU:   return u.fpu_ == rhs.u.fpu_;
             case Stack: return u.offset_ == rhs.u.offset_;
-            case -1:    return true;
-            default:    MOZ_CRASH("Invalid value for ABIArg kind");
+            case Uninitialized: return true;
         }
+        MOZ_CRASH("Invalid value for ABIArg kind");
     }
 
     bool operator!=(const ABIArg& rhs) const {

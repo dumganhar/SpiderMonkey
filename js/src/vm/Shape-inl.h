@@ -11,15 +11,14 @@
 
 #include "mozilla/TypeTraits.h"
 
-#include "jsobj.h"
-
 #include "gc/Allocator.h"
 #include "vm/Interpreter.h"
+#include "vm/JSObject.h"
 #include "vm/TypedArrayObject.h"
 
-#include "jsatominlines.h"
-#include "jscntxtinlines.h"
 #include "gc/Marking-inl.h"
+#include "vm/JSAtom-inl.h"
+#include "vm/JSContext-inl.h"
 
 namespace js {
 
@@ -38,7 +37,7 @@ AutoKeepShapeTables::~AutoKeepShapeTables()
 }
 
 inline
-StackBaseShape::StackBaseShape(JSContext* cx, const Class* clasp, uint32_t objectFlags)
+StackBaseShape::StackBaseShape(const Class* clasp, uint32_t objectFlags)
   : flags(objectFlags),
     clasp(clasp)
 {}
@@ -69,17 +68,19 @@ Shape::maybeCreateTableForLookup(JSContext* cx)
 template<MaybeAdding Adding>
 /* static */ inline bool
 Shape::search(JSContext* cx, Shape* start, jsid id, const AutoKeepShapeTables& keep,
-              Shape** pshape, ShapeTable::Entry** pentry)
+              Shape** pshape, ShapeTable** ptable, ShapeTable::Entry** pentry)
 {
     if (start->inDictionary()) {
         ShapeTable* table = start->ensureTableForDictionary(cx, keep);
         if (!table)
             return false;
+        *ptable = table;
         *pentry = &table->search<Adding>(id, keep);
         *pshape = (*pentry)->shape();
         return true;
     }
 
+    *ptable = nullptr;
     *pentry = nullptr;
     *pshape = Shape::search<Adding>(cx, start, id);
     return true;
@@ -399,15 +400,16 @@ NativeObject::addDataProperty(JSContext* cx, HandleNativeObject obj, HandleId id
     MOZ_ASSERT(!obj->containsPure(id));
 
     AutoKeepShapeTables keep(cx);
+    ShapeTable* table = nullptr;
     ShapeTable::Entry* entry = nullptr;
     if (obj->inDictionaryMode()) {
-        ShapeTable* table = obj->lastProperty()->ensureTableForDictionary(cx, keep);
+        table = obj->lastProperty()->ensureTableForDictionary(cx, keep);
         if (!table)
             return nullptr;
         entry = &table->search<MaybeAdding::Adding>(id, keep);
     }
 
-    return addDataPropertyInternal(cx, obj, id, slot, attrs, entry, keep);
+    return addDataPropertyInternal(cx, obj, id, slot, attrs, table, entry, keep);
 }
 
 /* static */ MOZ_ALWAYS_INLINE Shape*
@@ -419,15 +421,16 @@ NativeObject::addAccessorProperty(JSContext* cx, HandleNativeObject obj, HandleI
     MOZ_ASSERT(!obj->containsPure(id));
 
     AutoKeepShapeTables keep(cx);
+    ShapeTable* table = nullptr;
     ShapeTable::Entry* entry = nullptr;
     if (obj->inDictionaryMode()) {
-        ShapeTable* table = obj->lastProperty()->ensureTableForDictionary(cx, keep);
+        table = obj->lastProperty()->ensureTableForDictionary(cx, keep);
         if (!table)
             return nullptr;
         entry = &table->search<MaybeAdding::Adding>(id, keep);
     }
 
-    return addAccessorPropertyInternal(cx, obj, id, getter, setter, attrs, entry, keep);
+    return addAccessorPropertyInternal(cx, obj, id, getter, setter, attrs, table, entry, keep);
 }
 
 } /* namespace js */

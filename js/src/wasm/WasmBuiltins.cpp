@@ -19,11 +19,11 @@
 #include "wasm/WasmBuiltins.h"
 
 #include "mozilla/Atomics.h"
-#include "mozilla/BinarySearch.h"
 
 #include "fdlibm.h"
 #include "jslibmath.h"
 
+#include "jit/AtomicOperations.h"
 #include "jit/InlinableNatives.h"
 #include "jit/MacroAssembler.h"
 #include "threading/Mutex.h"
@@ -37,7 +37,6 @@ using namespace js;
 using namespace jit;
 using namespace wasm;
 
-using mozilla::BinarySearchIf;
 using mozilla::HashGeneric;
 using mozilla::IsNaN;
 using mozilla::MakeEnumeratedRange;
@@ -87,7 +86,7 @@ WasmHandleExecutionInterrupt()
 
     // If CheckForInterrupt succeeded, then execution can proceed and the
     // interrupt is over.
-    void* resumePC = activation->wasmResumePC();
+    void* resumePC = activation->wasmInterruptResumePC();
     activation->finishWasmInterrupt();
     return resumePC;
 }
@@ -96,17 +95,24 @@ static bool
 WasmHandleDebugTrap()
 {
     JitActivation* activation = CallingActivation();
-    MOZ_ASSERT(activation);
     JSContext* cx = activation->cx();
+    Frame* fp = activation->wasmExitFP();
+    Instance* instance = fp->tls->instance;
+    const Code& code = instance->code();
+    MOZ_ASSERT(code.metadata().debugEnabled);
 
-    WasmFrameIter frame(activation);
-    MOZ_ASSERT(frame.debugEnabled());
-    const CallSite* site = frame.debugTrapCallsite();
+    // The debug trap stub is the innermost frame. It's return address is the
+    // actual trap site.
+    const CallSite* site = code.lookupCallSite(fp->returnAddress);
     MOZ_ASSERT(site);
+
+    // Advance to the actual trapping frame.
+    fp = fp->callerFP;
+    DebugFrame* debugFrame = DebugFrame::from(fp);
+
     if (site->kind() == CallSite::EnterFrame) {
-        if (!frame.instance()->enterFrameTrapsEnabled())
+        if (!instance->enterFrameTrapsEnabled())
             return true;
-        DebugFrame* debugFrame = frame.debugFrame();
         debugFrame->setIsDebuggee();
         debugFrame->observe(cx);
         // TODO call onEnterFrame
@@ -121,15 +127,13 @@ WasmHandleDebugTrap()
         return status == JSTRAP_CONTINUE;
     }
     if (site->kind() == CallSite::LeaveFrame) {
-        DebugFrame* debugFrame = frame.debugFrame();
         debugFrame->updateReturnJSValue();
         bool ok = Debugger::onLeaveFrame(cx, debugFrame, nullptr, true);
         debugFrame->leave(cx);
         return ok;
     }
 
-    DebugFrame* debugFrame = frame.debugFrame();
-    DebugState& debug = frame.instance()->debug();
+    DebugState& debug = instance->debug();
     MOZ_ASSERT(debug.hasBreakpointTrapAtOffset(site->lineOrBytecode()));
     if (debug.stepModeEnabled(debugFrame->funcIndex())) {
         RootedValue result(cx, UndefinedValue());
@@ -171,10 +175,6 @@ wasm::HandleThrow(JSContext* cx, WasmFrameIter& iter)
     // is necessary to prevent a DebugFrame from being observed again after we
     // just called onLeaveFrame (which would lead to the frame being re-added
     // to the map of live frames, right as it becomes trash).
-    //
-    // TODO(bug 1360211): when JitActivation and WasmActivation get merged,
-    // we'll be able to switch to ion / other wasm state from here, and we'll
-    // need to do things differently.
 
     MOZ_ASSERT(CallingActivation() == iter.activation());
     MOZ_ASSERT(!iter.done());
@@ -220,6 +220,7 @@ wasm::HandleThrow(JSContext* cx, WasmFrameIter& iter)
     }
 
     MOZ_ASSERT(!cx->activation()->asJit()->isWasmInterrupted(), "unwinding clears the interrupt");
+    MOZ_ASSERT(!cx->activation()->asJit()->isWasmTrapping(), "unwinding clears the trapping state");
 
     return iter.unwoundAddressOfReturnAddress();
 }
@@ -234,7 +235,7 @@ WasmHandleThrow()
 }
 
 static void
-WasmReportTrap(int32_t trapIndex)
+WasmOldReportTrap(int32_t trapIndex)
 {
     JSContext* cx = TlsContext.get();
 
@@ -267,14 +268,27 @@ WasmReportTrap(int32_t trapIndex)
       case Trap::OutOfBounds:
         errorNumber = JSMSG_WASM_OUT_OF_BOUNDS;
         break;
+      case Trap::UnalignedAccess:
+        errorNumber = JSMSG_WASM_UNALIGNED_ACCESS;
+        break;
       case Trap::StackOverflow:
         errorNumber = JSMSG_OVER_RECURSED;
         break;
+      case Trap::ThrowReported:
+        // Error was already reported under another name.
+        return;
       default:
         MOZ_CRASH("unexpected trap");
     }
 
     JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr, errorNumber);
+}
+
+static void
+WasmReportTrap()
+{
+    Trap trap = TlsContext.get()->runtime()->wasmTrapData().trap;
+    WasmOldReportTrap(int32_t(trap));
 }
 
 static void
@@ -289,6 +303,13 @@ WasmReportUnalignedAccess()
 {
     JSContext* cx = TlsContext.get();
     JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr, JSMSG_WASM_UNALIGNED_ACCESS);
+}
+
+static void
+WasmReportInt64JSCall()
+{
+    JSContext* cx = TlsContext.get();
+    JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr, JSMSG_WASM_BAD_I64_TYPE);
 }
 
 static int32_t
@@ -320,6 +341,43 @@ CoerceInPlace_ToNumber(Value* rawVal)
     }
 
     *rawVal = DoubleValue(dbl);
+    return true;
+}
+
+static int32_t
+CoerceInPlace_JitEntry(int funcExportIndex, TlsData* tlsData, Value* argv)
+{
+    JSContext* cx = CallingActivation()->cx();
+
+    const Code& code = tlsData->instance->code();
+    const FuncExport& fe = code.metadata(code.stableTier()).funcExports[funcExportIndex];
+
+    for (size_t i = 0; i < fe.sig().args().length(); i++) {
+        HandleValue arg = HandleValue::fromMarkedLocation(&argv[i]);
+        switch (fe.sig().args()[i]) {
+          case ValType::I32: {
+            int32_t i32;
+            if (!ToInt32(cx, arg, &i32))
+                return false;
+            argv[i] = Int32Value(i32);
+            break;
+          }
+          case ValType::F32:
+          case ValType::F64: {
+            double dbl;
+            if (!ToNumber(cx, arg, &dbl))
+                return false;
+            // No need to convert double-to-float for f32, it's done inline
+            // in the wasm stub later.
+            argv[i] = DoubleValue(dbl);
+            break;
+          }
+          default: {
+            MOZ_CRASH("unexpected input argument in CoerceInPlace_JitEntry");
+          }
+        }
+    }
+
     return true;
 }
 
@@ -381,6 +439,35 @@ TruncateDoubleToUint64(double input)
     return uint64_t(input);
 }
 
+static int64_t
+SaturatingTruncateDoubleToInt64(double input)
+{
+    // Handle in-range values (except INT64_MIN).
+    if (fabs(input) < -double(INT64_MIN))
+        return int64_t(input);
+    // Handle NaN.
+    if (IsNaN(input))
+        return 0;
+    // Handle positive overflow.
+    if (input > 0)
+        return INT64_MAX;
+    // Handle negative overflow.
+    return INT64_MIN;
+}
+
+static uint64_t
+SaturatingTruncateDoubleToUint64(double input)
+{
+    // Handle positive overflow.
+    if (input >= -double(INT64_MIN) * 2.0)
+        return UINT64_MAX;
+    // Handle in-range values.
+    if (input >= -1.0)
+        return uint64_t(input);
+    // Handle NaN and negative overflow.
+    return 0;
+}
+
 static double
 Int64ToDouble(int32_t x_hi, uint32_t x_lo)
 {
@@ -434,14 +521,20 @@ AddressOf(SymbolicAddress imm, ABIFunctionType* abiType)
         *abiType = Args_General0;
         return FuncCast(WasmHandleThrow, *abiType);
       case SymbolicAddress::ReportTrap:
-        *abiType = Args_General1;
+        *abiType = Args_General0;
         return FuncCast(WasmReportTrap, *abiType);
+      case SymbolicAddress::OldReportTrap:
+        *abiType = Args_General1;
+        return FuncCast(WasmOldReportTrap, *abiType);
       case SymbolicAddress::ReportOutOfBounds:
         *abiType = Args_General0;
         return FuncCast(WasmReportOutOfBounds, *abiType);
       case SymbolicAddress::ReportUnalignedAccess:
         *abiType = Args_General0;
         return FuncCast(WasmReportUnalignedAccess, *abiType);
+      case SymbolicAddress::ReportInt64JSCall:
+        *abiType = Args_General0;
+        return FuncCast(WasmReportInt64JSCall, *abiType);
       case SymbolicAddress::CallImport_Void:
         *abiType = Args_General4;
         return FuncCast(Instance::callImport_void, *abiType);
@@ -460,6 +553,9 @@ AddressOf(SymbolicAddress imm, ABIFunctionType* abiType)
       case SymbolicAddress::CoerceInPlace_ToNumber:
         *abiType = Args_General1;
         return FuncCast(CoerceInPlace_ToNumber, *abiType);
+      case SymbolicAddress::CoerceInPlace_JitEntry:
+        *abiType = Args_General3;
+        return FuncCast(CoerceInPlace_JitEntry, *abiType);
       case SymbolicAddress::ToInt32:
         *abiType = Args_Int_Double;
         return FuncCast<int32_t (double)>(JS::ToInt32, *abiType);
@@ -481,6 +577,12 @@ AddressOf(SymbolicAddress imm, ABIFunctionType* abiType)
       case SymbolicAddress::TruncateDoubleToInt64:
         *abiType = Args_Int64_Double;
         return FuncCast(TruncateDoubleToInt64, *abiType);
+      case SymbolicAddress::SaturatingTruncateDoubleToUint64:
+        *abiType = Args_Int64_Double;
+        return FuncCast(SaturatingTruncateDoubleToUint64, *abiType);
+      case SymbolicAddress::SaturatingTruncateDoubleToInt64:
+        *abiType = Args_Int64_Double;
+        return FuncCast(SaturatingTruncateDoubleToInt64, *abiType);
       case SymbolicAddress::Uint64ToDouble:
         *abiType = Args_Double_IntInt;
         return FuncCast(Uint64ToDouble, *abiType);
@@ -500,27 +602,6 @@ AddressOf(SymbolicAddress imm, ABIFunctionType* abiType)
       case SymbolicAddress::aeabi_uidivmod:
         *abiType = Args_General2;
         return FuncCast(__aeabi_uidivmod, *abiType);
-      case SymbolicAddress::AtomicCmpXchg:
-        *abiType = Args_General5;
-        return FuncCast(atomics_cmpxchg_asm_callout, *abiType);
-      case SymbolicAddress::AtomicXchg:
-        *abiType = Args_General4;
-        return FuncCast(atomics_xchg_asm_callout, *abiType);
-      case SymbolicAddress::AtomicFetchAdd:
-        *abiType = Args_General4;
-        return FuncCast(atomics_add_asm_callout, *abiType);
-      case SymbolicAddress::AtomicFetchSub:
-        *abiType = Args_General4;
-        return FuncCast(atomics_sub_asm_callout, *abiType);
-      case SymbolicAddress::AtomicFetchAnd:
-        *abiType = Args_General4;
-        return FuncCast(atomics_and_asm_callout, *abiType);
-      case SymbolicAddress::AtomicFetchOr:
-        *abiType = Args_General4;
-        return FuncCast(atomics_or_asm_callout, *abiType);
-      case SymbolicAddress::AtomicFetchXor:
-        *abiType = Args_General4;
-        return FuncCast(atomics_xor_asm_callout, *abiType);
 #endif
       case SymbolicAddress::ModD:
         *abiType = Args_Double_DoubleDouble;
@@ -585,6 +666,19 @@ AddressOf(SymbolicAddress imm, ABIFunctionType* abiType)
       case SymbolicAddress::CurrentMemory:
         *abiType = Args_General1;
         return FuncCast(Instance::currentMemory_i32, *abiType);
+      case SymbolicAddress::WaitI32:
+        *abiType = Args_Int_GeneralGeneralGeneralInt64;
+        return FuncCast(Instance::wait_i32, *abiType);
+      case SymbolicAddress::WaitI64:
+        *abiType = Args_Int_GeneralGeneralInt64Int64;
+        return FuncCast(Instance::wait_i64, *abiType);
+      case SymbolicAddress::Wake:
+        *abiType = Args_General3;
+        return FuncCast(Instance::wake, *abiType);
+#if defined(JS_CODEGEN_MIPS32)
+      case SymbolicAddress::js_jit_gAtomic64Lock:
+        return &js::jit::gAtomic64Lock;
+#endif
       case SymbolicAddress::Limit:
         break;
     }
@@ -602,14 +696,18 @@ wasm::NeedsBuiltinThunk(SymbolicAddress sym)
       case SymbolicAddress::HandleDebugTrap:          // GenerateDebugTrapStub
       case SymbolicAddress::HandleThrow:              // GenerateThrowStub
       case SymbolicAddress::ReportTrap:               // GenerateTrapExit
+      case SymbolicAddress::OldReportTrap:            // GenerateOldTrapExit
       case SymbolicAddress::ReportOutOfBounds:        // GenerateOutOfBoundsExit
-      case SymbolicAddress::ReportUnalignedAccess:    // GeneratesUnalignedExit
+      case SymbolicAddress::ReportUnalignedAccess:    // GenerateUnalignedExit
       case SymbolicAddress::CallImport_Void:          // GenerateImportInterpExit
       case SymbolicAddress::CallImport_I32:
       case SymbolicAddress::CallImport_I64:
       case SymbolicAddress::CallImport_F64:
       case SymbolicAddress::CoerceInPlace_ToInt32:    // GenerateImportJitExit
       case SymbolicAddress::CoerceInPlace_ToNumber:
+#if defined(JS_CODEGEN_MIPS32)
+      case SymbolicAddress::js_jit_gAtomic64Lock:
+#endif
         return false;
       case SymbolicAddress::ToInt32:
       case SymbolicAddress::DivI64:
@@ -618,6 +716,8 @@ wasm::NeedsBuiltinThunk(SymbolicAddress sym)
       case SymbolicAddress::UModI64:
       case SymbolicAddress::TruncateDoubleToUint64:
       case SymbolicAddress::TruncateDoubleToInt64:
+      case SymbolicAddress::SaturatingTruncateDoubleToUint64:
+      case SymbolicAddress::SaturatingTruncateDoubleToInt64:
       case SymbolicAddress::Uint64ToDouble:
       case SymbolicAddress::Uint64ToFloat32:
       case SymbolicAddress::Int64ToDouble:
@@ -625,13 +725,6 @@ wasm::NeedsBuiltinThunk(SymbolicAddress sym)
 #if defined(JS_CODEGEN_ARM)
       case SymbolicAddress::aeabi_idivmod:
       case SymbolicAddress::aeabi_uidivmod:
-      case SymbolicAddress::AtomicCmpXchg:
-      case SymbolicAddress::AtomicXchg:
-      case SymbolicAddress::AtomicFetchAdd:
-      case SymbolicAddress::AtomicFetchSub:
-      case SymbolicAddress::AtomicFetchAnd:
-      case SymbolicAddress::AtomicFetchOr:
-      case SymbolicAddress::AtomicFetchXor:
 #endif
       case SymbolicAddress::ModD:
       case SymbolicAddress::SinD:
@@ -654,6 +747,11 @@ wasm::NeedsBuiltinThunk(SymbolicAddress sym)
       case SymbolicAddress::ATan2D:
       case SymbolicAddress::GrowMemory:
       case SymbolicAddress::CurrentMemory:
+      case SymbolicAddress::WaitI32:
+      case SymbolicAddress::WaitI64:
+      case SymbolicAddress::Wake:
+      case SymbolicAddress::CoerceInPlace_JitEntry:
+      case SymbolicAddress::ReportInt64JSCall:
         return true;
       case SymbolicAddress::Limit:
         break;
@@ -897,16 +995,16 @@ wasm::EnsureBuiltinThunksInitialized()
     memset(thunks->codeBase + masm.bytesNeeded(), 0, allocSize - masm.bytesNeeded());
 
     masm.processCodeLabels(thunks->codeBase);
-#ifdef DEBUG
+
     MOZ_ASSERT(masm.callSites().empty());
     MOZ_ASSERT(masm.callSiteTargets().empty());
     MOZ_ASSERT(masm.callFarJumps().empty());
     MOZ_ASSERT(masm.trapSites().empty());
-    MOZ_ASSERT(masm.trapFarJumps().empty());
+    MOZ_ASSERT(masm.oldTrapSites().empty());
+    MOZ_ASSERT(masm.oldTrapFarJumps().empty());
     MOZ_ASSERT(masm.callFarJumps().empty());
     MOZ_ASSERT(masm.memoryAccesses().empty());
     MOZ_ASSERT(masm.symbolicAccesses().empty());
-#endif
 
     ExecutableAllocator::cacheFlush(thunks->codeBase, thunks->codeSize);
     if (!ExecutableAllocator::makeExecutable(thunks->codeBase, thunks->codeSize))
@@ -970,11 +1068,11 @@ ToBuiltinABIFunctionType(const Sig& sig)
 }
 
 void*
-wasm::MaybeGetBuiltinThunk(HandleFunction f, const Sig& sig, JSContext* cx)
+wasm::MaybeGetBuiltinThunk(HandleFunction f, const Sig& sig)
 {
     MOZ_ASSERT(builtinThunks);
 
-    if (!f->isNative() || !f->jitInfo() || f->jitInfo()->type() != JSJitInfo::InlinableNative)
+    if (!f->isNative() || !f->hasJitInfo() || f->jitInfo()->type() != JSJitInfo::InlinableNative)
         return nullptr;
 
     Maybe<ABIFunctionType> abiType = ToBuiltinABIFunctionType(sig);

@@ -1094,6 +1094,30 @@ MacroAssembler::branchTestMagicImpl(Condition cond, const T& t, L label)
     j(cond, label);
 }
 
+void
+MacroAssembler::cmp32Move32(Condition cond, Register lhs, Register rhs, Register src,
+                            Register dest)
+{
+    cmp32(lhs, rhs);
+    cmovCCl(cond, src, dest);
+}
+
+void
+MacroAssembler::cmp32Move32(Condition cond, Register lhs, const Address& rhs, Register src,
+                            Register dest)
+{
+    cmp32(lhs, Operand(rhs));
+    cmovCCl(cond, src, dest);
+}
+
+void
+MacroAssembler::spectreZeroRegister(Condition cond, Register scratch, Register dest)
+{
+    // Note: use movl instead of move32/xorl to ensure flags are not clobbered.
+    movl(Imm32(0), scratch);
+    spectreMovePtr(cond, scratch, dest);
+}
+
 // ========================================================================
 // Canonicalization primitives.
 void

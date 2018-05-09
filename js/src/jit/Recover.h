@@ -14,8 +14,6 @@
 #include "jit/MIR.h"
 #include "jit/Snapshots.h"
 
-struct JSContext;
-
 namespace js {
 namespace jit {
 
@@ -87,6 +85,7 @@ namespace jit {
     _(Sqrt)                                     \
     _(Atan2)                                    \
     _(Hypot)                                    \
+    _(NearbyInt)                                \
     _(MathFunction)                             \
     _(Random)                                   \
     _(StringSplit)                              \
@@ -102,6 +101,7 @@ namespace jit {
     _(NewObject)                                \
     _(NewTypedArray)                            \
     _(NewArray)                                 \
+    _(NewArrayCopyOnWrite)                      \
     _(NewIterator)                              \
     _(NewDerivedTypedObject)                    \
     _(NewCallObject)                            \
@@ -466,6 +466,17 @@ class RHypot final : public RInstruction
      MOZ_MUST_USE bool recover(JSContext* cx, SnapshotIterator& iter) const override;
 };
 
+class RNearbyInt final : public RInstruction
+{
+  private:
+    uint8_t roundingMode_;
+
+  public:
+    RINSTRUCTION_HEADER_NUM_OP_(NearbyInt, 1)
+
+    MOZ_MUST_USE bool recover(JSContext* cx, SnapshotIterator& iter) const override;
+};
+
 class RMathFunction final : public RInstruction
 {
   private:
@@ -593,6 +604,17 @@ class RNewArray final : public RInstruction
 
   public:
     RINSTRUCTION_HEADER_NUM_OP_(NewArray, 1)
+
+    MOZ_MUST_USE bool recover(JSContext* cx, SnapshotIterator& iter) const override;
+};
+
+class RNewArrayCopyOnWrite final : public RInstruction
+{
+  private:
+    gc::InitialHeap initialHeap_;
+
+  public:
+    RINSTRUCTION_HEADER_NUM_OP_(NewArrayCopyOnWrite, 1)
 
     MOZ_MUST_USE bool recover(JSContext* cx, SnapshotIterator& iter) const override;
 };

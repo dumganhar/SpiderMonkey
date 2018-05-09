@@ -9,19 +9,13 @@
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/CheckedInt.h"
 #include "mozilla/DebugOnly.h"
-#include "mozilla/FloatingPoint.h"
 #include "mozilla/MathAlgorithms.h"
 
 #include <algorithm>
 
 #include "jsapi.h"
-#include "jsatom.h"
-#include "jscntxt.h"
 #include "jsfriendapi.h"
-#include "jsfun.h"
-#include "jsiter.h"
 #include "jsnum.h"
-#include "jsobj.h"
 #include "jstypes.h"
 #include "jsutil.h"
 
@@ -30,21 +24,26 @@
 #include "jit/InlinableNatives.h"
 #include "js/Class.h"
 #include "js/Conversions.h"
+#include "util/StringBuffer.h"
+#include "util/Text.h"
 #include "vm/ArgumentsObject.h"
 #include "vm/Interpreter.h"
+#include "vm/Iteration.h"
+#include "vm/JSAtom.h"
+#include "vm/JSContext.h"
+#include "vm/JSFunction.h"
+#include "vm/JSObject.h"
 #include "vm/SelfHosting.h"
 #include "vm/Shape.h"
-#include "vm/StringBuffer.h"
 #include "vm/TypedArrayObject.h"
 #include "vm/WrapperObject.h"
-
-#include "jsatominlines.h"
 
 #include "vm/ArgumentsObject-inl.h"
 #include "vm/ArrayObject-inl.h"
 #include "vm/Caches-inl.h"
 #include "vm/GeckoProfiler-inl.h"
 #include "vm/Interpreter-inl.h"
+#include "vm/JSAtom-inl.h"
 #include "vm/NativeObject-inl.h"
 #include "vm/UnboxedObject-inl.h"
 
@@ -56,7 +55,6 @@ using mozilla::ArrayLength;
 using mozilla::CeilingLog2;
 using mozilla::CheckedInt;
 using mozilla::DebugOnly;
-using mozilla::IsNaN;
 
 using JS::AutoCheckCannotGC;
 using JS::IsArrayAnswer;
@@ -171,7 +169,7 @@ ToLength(JSContext* cx, HandleValue v, uint64_t* out)
     return true;
 }
 
-static bool
+static MOZ_ALWAYS_INLINE bool
 GetLengthProperty(JSContext* cx, HandleObject obj, uint64_t* lengthp)
 {
     if (obj->is<ArrayObject>()) {
@@ -1065,10 +1063,27 @@ js::IsWrappedArrayConstructor(JSContext* cx, const Value& v, bool* result)
     return true;
 }
 
-static bool
+static MOZ_ALWAYS_INLINE bool
 IsArraySpecies(JSContext* cx, HandleObject origArray)
 {
-    if (origArray->is<NativeObject>() && !origArray->is<ArrayObject>())
+    if (MOZ_UNLIKELY(origArray->is<ProxyObject>())) {
+        if (origArray->getClass()->isDOMClass()) {
+#ifdef DEBUG
+            // We assume DOM proxies never return true for IsArray.
+            IsArrayAnswer answer;
+            MOZ_ASSERT(Proxy::isArray(cx, origArray, &answer));
+            MOZ_ASSERT(answer == IsArrayAnswer::NotArray);
+#endif
+            return true;
+        }
+        return false;
+    }
+
+    // 9.4.2.3 Step 4. Non-array objects always use the default constructor.
+    if (!origArray->is<ArrayObject>())
+        return true;
+
+    if (cx->compartment()->arraySpeciesLookup.tryOptimizeArray(cx, &origArray->as<ArrayObject>()))
         return true;
 
     Value ctor;
@@ -1110,8 +1125,6 @@ ArraySpeciesCreate(JSContext* cx, HandleObject origArray, uint64_t length, Mutab
     arr.set(&rval.toObject());
     return true;
 }
-
-#if JS_HAS_TOSOURCE
 
 static bool
 array_toSource(JSContext* cx, unsigned argc, Value* vp)
@@ -1189,8 +1202,6 @@ array_toSource(JSContext* cx, unsigned argc, Value* vp)
     args.rval().setString(str);
     return true;
 }
-
-#endif
 
 struct EmptySeparatorOp
 {
@@ -1508,8 +1519,10 @@ SetArrayElements(JSContext* cx, HandleObject obj, uint64_t start,
 static DenseElementResult
 ArrayReverseDenseKernel(JSContext* cx, HandleNativeObject obj, uint32_t length)
 {
-    /* An empty array or an array with no elements is already reversed. */
-    if (length == 0 || obj->getDenseInitializedLength() == 0)
+    MOZ_ASSERT(length > 1);
+
+    // If there are no elements, we're done.
+    if (obj->getDenseInitializedLength() == 0)
         return DenseElementResult::Success;
 
     if (obj->denseElementsAreFrozen())
@@ -1535,6 +1548,11 @@ ArrayReverseDenseKernel(JSContext* cx, HandleNativeObject obj, uint32_t length)
     } else {
         if (!obj->maybeCopyElementsForWrite(cx))
             return DenseElementResult::Failure;
+    }
+
+    if (!MaybeInIteration(obj, cx) && !cx->zone()->needsIncrementalBarrier()) {
+        obj->reverseDenseElementsNoPreBarrier(length);
+        return DenseElementResult::Success;
     }
 
     RootedValue origlo(cx), orighi(cx);
@@ -1577,6 +1595,12 @@ js::array_reverse(JSContext* cx, unsigned argc, Value* vp)
     uint64_t len;
     if (!GetLengthProperty(cx, obj, &len))
         return false;
+
+    // An empty array or an array with length 1 is already reversed.
+    if (len <= 1) {
+        args.rval().setObject(*obj);
+        return true;
+    }
 
     if (IsPackedArrayOrNoExtraIndexedProperties(obj, len) && len <= UINT32_MAX) {
         DenseElementResult result =
@@ -3473,9 +3497,7 @@ const JSJitInfo js::array_splice_info = {
 };
 
 static const JSFunctionSpec array_methods[] = {
-#if JS_HAS_TOSOURCE
     JS_FN(js_toSource_str,      array_toSource,     0,0),
-#endif
     JS_SELF_HOSTED_FN(js_toString_str, "ArrayToString",      0,0),
     JS_FN(js_toLocaleString_str,       array_toLocaleString, 0,0),
 
@@ -3513,12 +3535,16 @@ static const JSFunctionSpec array_methods[] = {
     JS_SELF_HOSTED_SYM_FN(iterator,  "ArrayValues",      0,0),
     JS_SELF_HOSTED_FN("entries",     "ArrayEntries",     0,0),
     JS_SELF_HOSTED_FN("keys",        "ArrayKeys",        0,0),
-#ifdef NIGHTLY_BUILD
     JS_SELF_HOSTED_FN("values",      "ArrayValues",      0,0),
-#endif
 
     /* ES7 additions */
     JS_SELF_HOSTED_FN("includes",    "ArrayIncludes",    2,0),
+
+#ifdef NIGHTLY_BUILD
+    JS_SELF_HOSTED_FN("flatMap",     "ArrayFlatMap",     1,0),
+    JS_SELF_HOSTED_FN("flatten",     "ArrayFlatten",     0,0),
+#endif
+
     JS_FS_END
 };
 
@@ -3757,8 +3783,11 @@ NewArray(JSContext* cx, uint32_t length,
     allocKind = GetBackgroundAllocKind(allocKind);
 
     RootedObject proto(cx, protoArg);
-    if (!proto && !GetBuiltinPrototype(cx, JSProto_Array, &proto))
-        return nullptr;
+    if (!proto) {
+        proto = GlobalObject::getOrCreateArrayPrototype(cx, cx->global());
+        if (!proto)
+            return nullptr;
+    }
 
     Rooted<TaggedProto> taggedProto(cx, TaggedProto(proto));
     bool isCachable = NewObjectWithTaggedProtoIsCachable(cx, taggedProto, newKind, &ArrayObject::class_);
@@ -4041,20 +4070,6 @@ js::NewCopiedArrayForCallingAllocationSite(JSContext* cx, const Value* vp, size_
     return NewCopiedArrayTryUseGroup(cx, group, vp, length);
 }
 
-bool
-js::NewValuePair(JSContext* cx, const Value& val1, const Value& val2, MutableHandleValue rval)
-{
-    JS::AutoValueArray<2> vec(cx);
-    vec[0].set(val1);
-    vec[1].set(val2);
-
-    JSObject* aobj = js::NewDenseCopiedArray(cx, 2, vec.begin());
-    if (!aobj)
-        return false;
-    rval.setObject(*aobj);
-    return true;
-}
-
 #ifdef DEBUG
 bool
 js::ArrayInfo(JSContext* cx, unsigned argc, Value* vp)
@@ -4082,3 +4097,151 @@ js::ArrayInfo(JSContext* cx, unsigned argc, Value* vp)
     return true;
 }
 #endif
+
+void
+js::ArraySpeciesLookup::initialize(JSContext* cx)
+{
+    MOZ_ASSERT(state_ == State::Uninitialized);
+
+    // Get the canonical Array.prototype.
+    NativeObject* arrayProto = cx->global()->maybeGetArrayPrototype();
+
+    // Leave the cache uninitialized if the Array class itself is not yet
+    // initialized.
+    if (!arrayProto)
+        return;
+
+    // Get the canonical Array constructor.
+    const Value& arrayCtorValue = cx->global()->getConstructor(JSProto_Array);
+    MOZ_ASSERT(arrayCtorValue.isObject(),
+               "The Array constructor is initialized iff Array.prototype is initialized");
+    JSFunction* arrayCtor = &arrayCtorValue.toObject().as<JSFunction>();
+
+    // Shortcut returns below means Array[@@species] will never be
+    // optimizable, set to disabled now, and clear it later when we succeed.
+    state_ = State::Disabled;
+
+    // Look up Array.prototype[@@iterator] and ensure it's a data property.
+    Shape* ctorShape = arrayProto->lookup(cx, NameToId(cx->names().constructor));
+    if (!ctorShape || !ctorShape->isDataProperty())
+        return;
+
+    // Get the referred value, and ensure it holds the canonical Array
+    // constructor.
+    JSFunction* ctorFun;
+    if (!IsFunctionObject(arrayProto->getSlot(ctorShape->slot()), &ctorFun))
+        return;
+    if (ctorFun != arrayCtor)
+        return;
+
+    // Look up the '@@species' value on Array
+    Shape* speciesShape = arrayCtor->lookup(cx, SYMBOL_TO_JSID(cx->wellKnownSymbols().species));
+    if (!speciesShape || !speciesShape->hasGetterValue())
+        return;
+
+    // Get the referred value, ensure it holds the canonical Array[@@species]
+    // function.
+    JSFunction* speciesFun;
+    if (!IsFunctionObject(speciesShape->getterValue(), &speciesFun))
+        return;
+    if (!IsSelfHostedFunctionWithName(speciesFun, cx->names().ArraySpecies))
+        return;
+
+    // Store raw pointers below. This is okay to do here, because all objects
+    // are in the tenured heap.
+    MOZ_ASSERT(!IsInsideNursery(arrayProto));
+    MOZ_ASSERT(!IsInsideNursery(arrayCtor));
+    MOZ_ASSERT(!IsInsideNursery(arrayCtor->lastProperty()));
+    MOZ_ASSERT(!IsInsideNursery(speciesShape));
+    MOZ_ASSERT(!IsInsideNursery(speciesFun));
+    MOZ_ASSERT(!IsInsideNursery(arrayProto->lastProperty()));
+
+    state_ = State::Initialized;
+    arrayProto_ = arrayProto;
+    arrayConstructor_ = arrayCtor;
+    arrayConstructorShape_ = arrayCtor->lastProperty();
+#ifdef DEBUG
+    arraySpeciesShape_ = speciesShape;
+    canonicalSpeciesFunc_ = speciesFun;
+#endif
+    arrayProtoShape_ = arrayProto->lastProperty();
+    arrayProtoConstructorSlot_ = ctorShape->slot();
+}
+
+void
+js::ArraySpeciesLookup::reset()
+{
+    state_ = State::Uninitialized;
+    arrayProto_ = nullptr;
+    arrayConstructor_ = nullptr;
+    arrayConstructorShape_ = nullptr;
+#ifdef DEBUG
+    arraySpeciesShape_ = nullptr;
+    canonicalSpeciesFunc_ = nullptr;
+#endif
+    arrayProtoShape_ = nullptr;
+    arrayProtoConstructorSlot_ = -1;
+}
+
+bool
+js::ArraySpeciesLookup::isArrayStateStillSane()
+{
+    MOZ_ASSERT(state_ == State::Initialized);
+
+    // Ensure that Array.prototype still has the expected shape.
+    if (arrayProto_->lastProperty() != arrayProtoShape_)
+        return false;
+
+    // Ensure that Array.prototype.constructor contains the canonical Array
+    // constructor function.
+    if (arrayProto_->getSlot(arrayProtoConstructorSlot_) != ObjectValue(*arrayConstructor_))
+        return false;
+
+    // Ensure that Array still has the expected shape.
+    if (arrayConstructor_->lastProperty() != arrayConstructorShape_)
+        return false;
+
+    // Ensure the species getter contains the canonical @@species function.
+    // Note: This is currently guaranteed to be always true, because modifying
+    // the getter property implies a new shape is generated. If this ever
+    // changes, convert this assertion into an if-statement.
+    MOZ_ASSERT(arraySpeciesShape_->getterObject() == canonicalSpeciesFunc_);
+
+    return true;
+}
+
+bool
+js::ArraySpeciesLookup::tryOptimizeArray(JSContext* cx, ArrayObject* array)
+{
+    if (state_ == State::Uninitialized) {
+        // If the cache is not initialized, initialize it.
+        initialize(cx);
+    } else if (state_ == State::Initialized && !isArrayStateStillSane()) {
+        // Otherwise, if the array state is no longer sane, reinitialize.
+        reset();
+        initialize(cx);
+    }
+
+    // If the cache is disabled or still uninitialized, don't bother trying to
+    // optimize.
+    if (state_ != State::Initialized)
+        return false;
+
+    // By the time we get here, we should have a sane array state.
+    MOZ_ASSERT(isArrayStateStillSane());
+
+    // Ensure |array|'s prototype is the actual Array.prototype.
+    if (array->staticPrototype() != arrayProto_)
+        return false;
+
+    // Ensure |array| doesn't define any own properties besides its
+    // non-deletable "length" property. This serves as a quick check to make
+    // sure |array| doesn't define an own "constructor" property which may
+    // shadow Array.prototype.constructor.
+    Shape* shape = array->shape();
+    if (shape->previous() && !shape->previous()->isEmptyShape())
+        return false;
+
+    MOZ_ASSERT(JSID_IS_ATOM(shape->propidRaw(), cx->names().length));
+    return true;
+}

@@ -13,13 +13,13 @@ PACKAGE_VERSION = '0.3'
 try:
     pwd = os.path.dirname(os.path.abspath(__file__))
     description = open(os.path.join(pwd, 'README.rst')).read()
-except:
+except Exception:
     description = ''
 
 setup(
     name='mozsystemmonitor',
     description='Monitor system resource usage.',
-    long_description=description,
+    long_description="see https://firefox-source-docs.mozilla.org/mozbase/index.html",
     license='MPL 2.0',
     keywords='mozilla',
     author='Mozilla Automation and Tools Team',

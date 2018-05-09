@@ -63,7 +63,7 @@ class OutOfLineNaNToZero;
 
 class CodeGenerator final : public CodeGeneratorSpecific
 {
-    void generateArgumentsChecks(bool bailout = true);
+    void generateArgumentsChecks(bool assert = false);
     MOZ_MUST_USE bool generateBody();
 
     ConstantOrRegister toConstantOrRegister(LInstruction* lir, size_t n, MIRType type);
@@ -155,23 +155,27 @@ class CodeGenerator final : public CodeGeneratorSpecific
     void visitConvertElementsToDoubles(LConvertElementsToDoubles* lir);
     void visitMaybeToDoubleElement(LMaybeToDoubleElement* lir);
     void visitMaybeCopyElementsForWrite(LMaybeCopyElementsForWrite* lir);
+    void visitGuardShape(LGuardShape* guard);
+    void visitGuardObjectGroup(LGuardObjectGroup* guard);
     void visitGuardObjectIdentity(LGuardObjectIdentity* guard);
     void visitGuardReceiverPolymorphic(LGuardReceiverPolymorphic* lir);
     void visitGuardUnboxedExpando(LGuardUnboxedExpando* lir);
     void visitLoadUnboxedExpando(LLoadUnboxedExpando* lir);
     void visitTypeBarrierV(LTypeBarrierV* lir);
     void visitTypeBarrierO(LTypeBarrierO* lir);
-    void visitMonitorTypes(LMonitorTypes* lir);
     void emitPostWriteBarrier(const LAllocation* obj);
     void emitPostWriteBarrier(Register objreg);
-    template <class LPostBarrierType>
-    void visitPostWriteBarrierCommonO(LPostBarrierType* lir, OutOfLineCode* ool);
+    void emitPostWriteBarrierS(Address address, Register prev, Register next);
+    template <class LPostBarrierType, MIRType nurseryType>
+    void visitPostWriteBarrierCommon(LPostBarrierType* lir, OutOfLineCode* ool);
     template <class LPostBarrierType>
     void visitPostWriteBarrierCommonV(LPostBarrierType* lir, OutOfLineCode* ool);
     void visitPostWriteBarrierO(LPostWriteBarrierO* lir);
     void visitPostWriteElementBarrierO(LPostWriteElementBarrierO* lir);
     void visitPostWriteBarrierV(LPostWriteBarrierV* lir);
     void visitPostWriteElementBarrierV(LPostWriteElementBarrierV* lir);
+    void visitPostWriteBarrierS(LPostWriteBarrierS* lir);
+    void visitPostWriteElementBarrierS(LPostWriteElementBarrierS* lir);
     void visitOutOfLineCallPostWriteBarrier(OutOfLineCallPostWriteBarrier* ool);
     void visitOutOfLineCallPostWriteElementBarrier(OutOfLineCallPostWriteElementBarrier* ool);
     void visitCallNative(LCallNative* call);
@@ -232,6 +236,7 @@ class CodeGenerator final : public CodeGeneratorSpecific
     void visitSetArgumentsObjectArg(LSetArgumentsObjectArg* lir);
     void visitReturnFromCtor(LReturnFromCtor* lir);
     void visitComputeThis(LComputeThis* lir);
+    void visitImplicitThis(LImplicitThis* lir);
     void visitArrayLength(LArrayLength* lir);
     void visitSetArrayLength(LSetArrayLength* lir);
     void visitGetNextEntryForIterator(LGetNextEntryForIterator* lir);
@@ -250,16 +255,17 @@ class CodeGenerator final : public CodeGeneratorSpecific
     void visitBoundsCheck(LBoundsCheck* lir);
     void visitBoundsCheckRange(LBoundsCheckRange* lir);
     void visitBoundsCheckLower(LBoundsCheckLower* lir);
+    void visitSpectreMaskIndex(LSpectreMaskIndex* lir);
     void visitLoadFixedSlotV(LLoadFixedSlotV* ins);
     void visitLoadFixedSlotAndUnbox(LLoadFixedSlotAndUnbox* lir);
     void visitLoadFixedSlotT(LLoadFixedSlotT* ins);
     void visitStoreFixedSlotV(LStoreFixedSlotV* ins);
     void visitStoreFixedSlotT(LStoreFixedSlotT* ins);
-    void emitGetPropertyPolymorphic(LInstruction* lir, Register obj,
+    void emitGetPropertyPolymorphic(LInstruction* lir, Register obj, Register expandoScratch,
                                     Register scratch, const TypedOrValueRegister& output);
     void visitGetPropertyPolymorphicV(LGetPropertyPolymorphicV* ins);
     void visitGetPropertyPolymorphicT(LGetPropertyPolymorphicT* ins);
-    void emitSetPropertyPolymorphic(LInstruction* lir, Register obj,
+    void emitSetPropertyPolymorphic(LInstruction* lir, Register obj, Register expandoScratch,
                                     Register scratch, const ConstantOrRegister& value);
     void visitSetPropertyPolymorphicV(LSetPropertyPolymorphicV* ins);
     void visitSetPropertyPolymorphicT(LSetPropertyPolymorphicT* ins);
@@ -282,6 +288,11 @@ class CodeGenerator final : public CodeGeneratorSpecific
     void visitIsNullOrLikeUndefinedT(LIsNullOrLikeUndefinedT* lir);
     void visitIsNullOrLikeUndefinedAndBranchV(LIsNullOrLikeUndefinedAndBranchV* lir);
     void visitIsNullOrLikeUndefinedAndBranchT(LIsNullOrLikeUndefinedAndBranchT* lir);
+    void emitSameValue(FloatRegister left, FloatRegister right, FloatRegister temp,
+                       Register output);
+    void visitSameValueD(LSameValueD* lir);
+    void visitSameValueV(LSameValueV* lir);
+    void visitSameValueVM(LSameValueVM* lir);
     void emitConcat(LInstruction* lir, Register lhs, Register rhs, Register output);
     void visitConcat(LConcat* lir);
     void visitCharCodeAt(LCharCodeAt* lir);
@@ -330,8 +341,9 @@ class CodeGenerator final : public CodeGeneratorSpecific
                            Register elementsTemp, Register lengthTemp, TypedOrValueRegister out);
     void visitArrayPopShiftV(LArrayPopShiftV* lir);
     void visitArrayPopShiftT(LArrayPopShiftT* lir);
-    void emitArrayPush(LInstruction* lir, const MArrayPush* mir, Register obj,
-                       const ConstantOrRegister& value, Register elementsTemp, Register length);
+    void emitArrayPush(LInstruction* lir, Register obj,
+                       const ConstantOrRegister& value, Register elementsTemp, Register length,
+                       Register spectreTemp);
     void visitArrayPushV(LArrayPushV* lir);
     void visitArrayPushT(LArrayPushT* lir);
     void visitArraySlice(LArraySlice* lir);
@@ -369,7 +381,7 @@ class CodeGenerator final : public CodeGeneratorSpecific
     void visitInArray(LInArray* ins);
     void visitInstanceOfO(LInstanceOfO* ins);
     void visitInstanceOfV(LInstanceOfV* ins);
-    void visitCallInstanceOf(LCallInstanceOf* ins);
+    void visitInstanceOfCache(LInstanceOfCache* ins);
     void visitGetDOMProperty(LGetDOMProperty* lir);
     void visitGetDOMMemberV(LGetDOMMemberV* lir);
     void visitGetDOMMemberT(LGetDOMMemberT* lir);
@@ -445,14 +457,18 @@ class CodeGenerator final : public CodeGeneratorSpecific
 
     void visitAssertResultV(LAssertResultV* ins);
     void visitAssertResultT(LAssertResultT* ins);
+
+#ifdef DEBUG
     void emitAssertResultV(const ValueOperand output, const TemporaryTypeSet* typeset);
     void emitAssertObjectOrStringResult(Register input, MIRType type, const TemporaryTypeSet* typeset);
+#endif
 
     void visitInterruptCheck(LInterruptCheck* lir);
     void visitOutOfLineInterruptCheckImplicit(OutOfLineInterruptCheckImplicit* ins);
     void visitWasmTrap(LWasmTrap* lir);
     void visitWasmLoadTls(LWasmLoadTls* ins);
     void visitWasmBoundsCheck(LWasmBoundsCheck* ins);
+    void visitWasmAlignmentCheck(LWasmAlignmentCheck* ins);
     void visitRecompileCheck(LRecompileCheck* ins);
     void visitRotate(LRotate* ins);
 
@@ -473,13 +489,13 @@ class CodeGenerator final : public CodeGeneratorSpecific
     void addGetPropertyCache(LInstruction* ins, LiveRegisterSet liveRegs,
                              TypedOrValueRegister value, const ConstantOrRegister& id,
                              TypedOrValueRegister output, Register maybeTemp,
-                             GetPropertyResultFlags flags, jsbytecode* profilerLeavePc);
+                             GetPropertyResultFlags flags);
     void addSetPropertyCache(LInstruction* ins, LiveRegisterSet liveRegs, Register objReg,
                              Register temp, FloatRegister tempDouble,
                              FloatRegister tempF32, const ConstantOrRegister& id,
                              const ConstantOrRegister& value,
                              bool strict, bool needsPostBarrier, bool needsTypeBarrier,
-                             bool guardHoles, jsbytecode* profilerLeavePc);
+                             bool guardHoles);
 
     MOZ_MUST_USE bool generateBranchV(const ValueOperand& value, Label* ifTrue, Label* ifFalse,
                                       FloatRegister fr);
@@ -603,10 +619,12 @@ class CodeGenerator final : public CodeGeneratorSpecific
     //
     // Instead of saving the pointers, we just save the index of the Read
     // Barriered objects in a bit mask.
-    uint32_t simdRefreshTemplatesDuringLink_;
+    uint32_t simdTemplatesToReadBarrier_;
 
-    void registerSimdTemplate(SimdType simdType);
-    void captureSimdTemplate(JSContext* cx);
+    // Bit mask of JitCompartment stubs that are to be read-barriered.
+    uint32_t compartmentStubsToReadBarrier_;
+
+    void addSimdTemplateToReadBarrier(SimdType simdType);
 };
 
 } // namespace jit

@@ -64,8 +64,9 @@ struct CompiledCode
     CodeRangeVector      codeRanges;
     CallSiteVector       callSites;
     CallSiteTargetVector callSiteTargets;
-    TrapSiteVector       trapSites;
-    TrapFarJumpVector    trapFarJumps;
+    TrapSiteVectorArray  trapSites;
+    OldTrapSiteVector    oldTrapSites;
+    OldTrapFarJumpVector oldTrapFarJumps;
     CallFarJumpVector    callFarJumps;
     MemoryAccessVector   memoryAccesses;
     SymbolicAccessVector symbolicAccesses;
@@ -79,7 +80,8 @@ struct CompiledCode
         callSites.clear();
         callSiteTargets.clear();
         trapSites.clear();
-        trapFarJumps.clear();
+        oldTrapSites.clear();
+        oldTrapFarJumps.clear();
         callFarJumps.clear();
         memoryAccesses.clear();
         symbolicAccesses.clear();
@@ -93,7 +95,8 @@ struct CompiledCode
                callSites.empty() &&
                callSiteTargets.empty() &&
                trapSites.empty() &&
-               trapFarJumps.empty() &&
+               oldTrapSites.empty() &&
+               oldTrapFarJumps.empty() &&
                callFarJumps.empty() &&
                memoryAccesses.empty() &&
                symbolicAccesses.empty() &&
@@ -145,7 +148,7 @@ struct CompileTask
 class MOZ_STACK_CLASS ModuleGenerator
 {
     typedef Vector<CompileTask, 0, SystemAllocPolicy> CompileTaskVector;
-    typedef EnumeratedArray<Trap, Trap::Limit, uint32_t> Uint32TrapArray;
+    typedef EnumeratedArray<Trap, Trap::Limit, uint32_t> OldTrapOffsetArray;
     typedef Vector<jit::CodeOffset, 0, SystemAllocPolicy> CodeOffsetVector;
 
     // Constant parameters
@@ -156,9 +159,8 @@ class MOZ_STACK_CLASS ModuleGenerator
 
     // Data that is moved into the result of finish()
     Assumptions                     assumptions_;
-    LinkDataTier*                   linkDataTier_; // Owned by linkData_
-    LinkData                        linkData_;
-    MetadataTier*                   metadataTier_; // Owned by metadata_
+    UniqueLinkDataTier              linkDataTier_;
+    UniqueMetadataTier              metadataTier_;
     MutableMetadata                 metadata_;
 
     // Data scoped to the ModuleGenerator's lifetime
@@ -168,9 +170,9 @@ class MOZ_STACK_CLASS ModuleGenerator
     jit::TempAllocator              masmAlloc_;
     jit::MacroAssembler             masm_;
     Uint32Vector                    funcToCodeRange_;
-    Uint32TrapArray                 trapCodeOffsets_;
+    OldTrapOffsetArray              oldTrapCodeOffsets_;
     uint32_t                        debugTrapCodeOffset_;
-    TrapFarJumpVector               trapFarJumps_;
+    OldTrapFarJumpVector            oldTrapFarJumps_;
     CallFarJumpVector               callFarJumps_;
     CallSiteTargetVector            callSiteTargets_;
     uint32_t                        lastPatchedCallSite_;
@@ -200,8 +202,7 @@ class MOZ_STACK_CLASS ModuleGenerator
     bool finishOutstandingTask();
     bool finishCode();
     bool finishMetadata(const ShareableBytes& bytecode);
-    UniqueCodeSegment finish(const ShareableBytes& bytecode);
-    UniqueJumpTable createJumpTable(const CodeSegment& codeSegment);
+    UniqueModuleSegment finish(const ShareableBytes& bytecode);
 
     bool isAsmJS() const { return env_->isAsmJS(); }
     Tier tier() const { return env_->tier; }

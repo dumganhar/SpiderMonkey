@@ -36,6 +36,7 @@
 #include "jit/arm/Architecture-arm.h"
 #include "jit/arm/disasm/Disasm-arm.h"
 #include "jit/IonTypes.h"
+#include "js/ProfilingFrameIterator.h"
 #include "threading/Thread.h"
 #include "vm/MutexIDs.h"
 #include "wasm/WasmCode.h"
@@ -112,11 +113,13 @@ class Simulator
     explicit Simulator(JSContext* cx);
     ~Simulator();
 
+    static bool supportsAtomics() { return HasLDSTREXBHD(); }
+
     // The currently executing Simulator instance. Potentially there can be one
     // for each native thread.
     static Simulator* Current();
 
-    static inline uintptr_t StackLimit() {
+    static uintptr_t StackLimit() {
         return Simulator::Current()->stackLimit();
     }
 
@@ -291,10 +294,11 @@ class Simulator
 
     // Handle a wasm interrupt triggered by an async signal handler.
     void handleWasmInterrupt();
-    void startWasmInterrupt(JitActivation* act);
+    JS::ProfilingFrameIterator::RegisterState registerState();
 
     // Handle any wasm faults, returning true if the fault was handled.
-    bool handleWasmFault(int32_t addr, unsigned numBytes);
+    bool handleWasmSegFault(int32_t addr, unsigned numBytes);
+    bool handleWasmIllFault();
 
     // Read and write memory.
     inline uint8_t readBU(int32_t addr);

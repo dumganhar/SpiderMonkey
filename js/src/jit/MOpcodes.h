@@ -44,6 +44,7 @@ namespace jit {
     _(ObjectGroupDispatch)                                                  \
     _(FunctionDispatch)                                                     \
     _(Compare)                                                              \
+    _(SameValue)                                                            \
     _(Phi)                                                                  \
     _(Beta)                                                                 \
     _(NaNToZero)                                                            \
@@ -66,6 +67,7 @@ namespace jit {
     _(GetArgumentsObjectArg)                                                \
     _(SetArgumentsObjectArg)                                                \
     _(ComputeThis)                                                          \
+    _(ImplicitThis)                                                         \
     _(Call)                                                                 \
     _(ApplyArgs)                                                            \
     _(ApplyArray)                                                           \
@@ -125,7 +127,7 @@ namespace jit {
     _(AssertRange)                                                          \
     _(ToDouble)                                                             \
     _(ToFloat32)                                                            \
-    _(ToInt32)                                                              \
+    _(ToNumberInt32)                                                        \
     _(TruncateToInt32)                                                      \
     _(WrapInt64ToInt32)                                                     \
     _(ExtendInt32ToInt64)                                                   \
@@ -184,7 +186,6 @@ namespace jit {
     _(HomeObjectSuperBase)                                                  \
     _(FilterTypeSet)                                                        \
     _(TypeBarrier)                                                          \
-    _(MonitorTypes)                                                         \
     _(PostWriteBarrier)                                                     \
     _(PostWriteElementBarrier)                                              \
     _(GetPropSuperCache)                                                    \
@@ -197,7 +198,6 @@ namespace jit {
     _(GuardReceiverPolymorphic)                                             \
     _(GuardObjectGroup)                                                     \
     _(GuardObjectIdentity)                                                  \
-    _(GuardClass)                                                           \
     _(GuardUnboxedExpando)                                                  \
     _(LoadUnboxedExpando)                                                   \
     _(ArrayLength)                                                          \
@@ -214,6 +214,7 @@ namespace jit {
     _(Not)                                                                  \
     _(BoundsCheck)                                                          \
     _(BoundsCheckLower)                                                     \
+    _(SpectreMaskIndex)                                                     \
     _(InArray)                                                              \
     _(LoadElement)                                                          \
     _(LoadElementHole)                                                      \
@@ -233,9 +234,7 @@ namespace jit {
     _(ArraySlice)                                                           \
     _(ArrayJoin)                                                            \
     _(LoadTypedArrayElementHole)                                            \
-    _(LoadTypedArrayElementStatic)                                          \
     _(StoreTypedArrayElementHole)                                           \
-    _(StoreTypedArrayElementStatic)                                         \
     _(AtomicIsLockFree)                                                     \
     _(GuardSharedTypedArray)                                                \
     _(CompareExchangeTypedArrayElement)                                     \
@@ -273,7 +272,7 @@ namespace jit {
     _(InCache)                                                              \
     _(HasOwnCache)                                                          \
     _(InstanceOf)                                                           \
-    _(CallInstanceOf)                                                       \
+    _(InstanceOfCache)                                                      \
     _(InterruptCheck)                                                       \
     _(GetDOMProperty)                                                       \
     _(GetDOMMember)                                                         \
@@ -306,11 +305,12 @@ namespace jit {
     _(GetPrototypeOf)                                                       \
     _(AsmJSLoadHeap)                                                        \
     _(AsmJSStoreHeap)                                                       \
-    _(AsmJSCompareExchangeHeap)                                             \
-    _(AsmJSAtomicExchangeHeap)                                              \
-    _(AsmJSAtomicBinopHeap)                                                 \
+    _(WasmCompareExchangeHeap)                                              \
+    _(WasmAtomicExchangeHeap)                                               \
+    _(WasmAtomicBinopHeap)                                                  \
     _(WasmNeg)                                                              \
     _(WasmBoundsCheck)                                                      \
+    _(WasmAlignmentCheck)                                                   \
     _(WasmLoadTls)                                                          \
     _(WasmAddOffset)                                                        \
     _(WasmLoad)                                                             \
@@ -349,7 +349,7 @@ class MDefinitionVisitor // interface i.e. pure abstract class
 class MDefinitionVisitorDefaultNYI : public MDefinitionVisitor
 {
   public:
-#define VISIT_INS(op) virtual void visit##op(M##op*) { MOZ_CRASH("NYI: " #op); }
+#define VISIT_INS(op) virtual void visit##op(M##op*) override { MOZ_CRASH("NYI: " #op); }
     MIR_OPCODE_LIST(VISIT_INS)
 #undef VISIT_INS
 };
@@ -358,7 +358,7 @@ class MDefinitionVisitorDefaultNYI : public MDefinitionVisitor
 class MDefinitionVisitorDefaultNoop : public MDefinitionVisitor
 {
   public:
-#define VISIT_INS(op) virtual void visit##op(M##op*) { }
+#define VISIT_INS(op) virtual void visit##op(M##op*) override { }
     MIR_OPCODE_LIST(VISIT_INS)
 #undef VISIT_INS
 };

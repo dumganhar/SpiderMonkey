@@ -81,16 +81,13 @@ class LIRGeneratorMIPSShared : public LIRGeneratorShared
 
   public:
     void lowerPhi(MPhi* phi);
-    void visitGuardShape(MGuardShape* ins);
-    void visitGuardObjectGroup(MGuardObjectGroup* ins);
     void visitWasmUnsignedToDouble(MWasmUnsignedToDouble* ins);
     void visitWasmUnsignedToFloat32(MWasmUnsignedToFloat32* ins);
     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins);
     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins);
-    void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
-    void visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins);
-    void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
-    void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins);
+    void visitWasmCompareExchangeHeap(MWasmCompareExchangeHeap* ins);
+    void visitWasmAtomicExchangeHeap(MWasmAtomicExchangeHeap* ins);
+    void visitWasmAtomicBinopHeap(MWasmAtomicBinopHeap* ins);
     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins);
     void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins);
     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);

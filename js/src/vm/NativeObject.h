@@ -13,16 +13,16 @@
 #include <stdint.h>
 
 #include "jsfriendapi.h"
-#include "jsobj.h"
 #include "NamespaceImports.h"
 
 #include "gc/Barrier.h"
 #include "gc/Heap.h"
 #include "gc/Marking.h"
 #include "js/Value.h"
+#include "vm/JSObject.h"
 #include "vm/Shape.h"
 #include "vm/ShapedObject.h"
-#include "vm/String.h"
+#include "vm/StringType.h"
 #include "vm/TypeInference.h"
 
 namespace js {
@@ -413,7 +413,7 @@ enum class ShouldUpdateTypes {
 /*
  * NativeObject specifies the internal implementation of a native object.
  *
- * Native objects use ShapedObject::shape_ to record property information.  Two
+ * Native objects use ShapedObject::shape to record property information. Two
  * native objects with the same shape are guaranteed to have the same number of
  * fixed slots.
  *
@@ -476,8 +476,8 @@ class NativeObject : public ShapedObject
 
   public:
     Shape* lastProperty() const {
-        MOZ_ASSERT(shape_);
-        return shape_;
+        MOZ_ASSERT(shape());
+        return shape();
     }
 
     uint32_t propertyCount() const {
@@ -549,6 +549,10 @@ class NativeObject : public ShapedObject
 
     static inline JS::Result<NativeObject*, JS::OOM&>
     createWithTemplate(JSContext* cx, js::gc::InitialHeap heap, HandleObject templateObject);
+
+#ifdef DEBUG
+    static void enableShapeConsistencyChecks();
+#endif
 
   protected:
 #ifdef DEBUG
@@ -676,14 +680,20 @@ class NativeObject : public ShapedObject
     }
 
   public:
+
+    /* Object allocation may directly initialize slots so this is public. */
+    void initSlots(HeapSlot* slots) {
+        slots_ = slots;
+    }
+
     static MOZ_MUST_USE bool generateOwnShape(JSContext* cx, HandleNativeObject obj,
                                               Shape* newShape = nullptr)
     {
         return replaceWithNewEquivalentShape(cx, obj, obj->lastProperty(), newShape);
     }
 
-    static MOZ_MUST_USE bool shadowingShapeChange(JSContext* cx, HandleNativeObject obj,
-                                                  const Shape& shape);
+    static MOZ_MUST_USE bool reshapeForShadowedProp(JSContext* cx, HandleNativeObject obj);
+    static MOZ_MUST_USE bool reshapeForProtoMutation(JSContext* cx, HandleNativeObject obj);
     static bool clearFlag(JSContext* cx, HandleNativeObject obj, BaseShape::Flag flag);
 
     // The maximum number of slots in an object.
@@ -731,7 +741,7 @@ class NativeObject : public ShapedObject
      */
     bool hasAllFlags(js::BaseShape::Flag flags) const {
         MOZ_ASSERT(flags);
-        return shape_->hasAllObjectFlags(flags);
+        return shape()->hasAllObjectFlags(flags);
     }
     bool nonProxyIsExtensible() const {
         return !hasAllFlags(js::BaseShape::NOT_EXTENSIBLE);
@@ -854,6 +864,14 @@ class NativeObject : public ShapedObject
                                                              HandleShape parent,
                                                              MutableHandle<StackShape> child);
 
+    static MOZ_ALWAYS_INLINE bool
+    maybeConvertToOrGrowDictionaryForAdd(JSContext* cx, HandleNativeObject obj, HandleId id,
+                                         ShapeTable** table, ShapeTable::Entry** entry,
+                                         const AutoKeepShapeTables& keep);
+
+    static bool maybeToDictionaryModeForPut(JSContext* cx, HandleNativeObject obj,
+                                            MutableHandleShape shape);
+
   public:
     /* Add a property whose id is not yet in this scope. */
     static MOZ_ALWAYS_INLINE Shape* addDataProperty(JSContext* cx, HandleNativeObject obj, HandleId id,
@@ -898,13 +916,14 @@ class NativeObject : public ShapedObject
      */
     static Shape*
     addDataPropertyInternal(JSContext* cx, HandleNativeObject obj, HandleId id,
-                            uint32_t slot, unsigned attrs, ShapeTable::Entry* entry,
-                            const AutoKeepShapeTables& keep);
+                            uint32_t slot, unsigned attrs, ShapeTable* table,
+                            ShapeTable::Entry* entry, const AutoKeepShapeTables& keep);
 
     static Shape*
     addAccessorPropertyInternal(JSContext* cx, HandleNativeObject obj, HandleId id,
                                 JSGetterOp getter, JSSetterOp setter, unsigned attrs,
-                                ShapeTable::Entry* entry, const AutoKeepShapeTables& keep);
+                                ShapeTable* table, ShapeTable::Entry* entry,
+                                const AutoKeepShapeTables& keep);
 
     static MOZ_MUST_USE bool fillInAfterSwap(JSContext* cx, HandleNativeObject obj,
                                              const Vector<Value>& values, void* priv);
@@ -1004,7 +1023,7 @@ class NativeObject : public ShapedObject
         MOZ_ASSERT(end <= getDenseInitializedLength());
         MOZ_ASSERT(!denseElementsAreCopyOnWrite());
         for (size_t i = start; i < end; i++)
-            elements_[i].HeapSlot::~HeapSlot();
+            elements_[i].destroy();
     }
 
     /*
@@ -1013,7 +1032,7 @@ class NativeObject : public ShapedObject
      */
     void prepareSlotRangeForOverwrite(size_t start, size_t end) {
         for (size_t i = start; i < end; i++)
-            getSlotAddressUnchecked(i)->HeapSlot::~HeapSlot();
+            getSlotAddressUnchecked(i)->destroy();
     }
 
     inline void shiftDenseElementsUnchecked(uint32_t count);
@@ -1165,8 +1184,7 @@ class NativeObject : public ShapedObject
     }
 
   private:
-    inline void ensureDenseInitializedLengthNoPackedCheck(JSContext* cx,
-                                                          uint32_t index, uint32_t extra);
+    inline void ensureDenseInitializedLengthNoPackedCheck(uint32_t index, uint32_t extra);
 
     // Run a post write barrier that encompasses multiple contiguous elements in a
     // single step.
@@ -1234,6 +1252,7 @@ class NativeObject : public ShapedObject
     inline void initDenseElements(NativeObject* src, uint32_t srcStart, uint32_t count);
     inline void moveDenseElements(uint32_t dstStart, uint32_t srcStart, uint32_t count);
     inline void moveDenseElementsNoPreBarrier(uint32_t dstStart, uint32_t srcStart, uint32_t count);
+    inline void reverseDenseElementsNoPreBarrier(uint32_t length);
 
     inline DenseElementResult
     setOrExtendDenseElements(JSContext* cx, uint32_t start, const Value* vp, uint32_t count,
@@ -1309,6 +1328,10 @@ class NativeObject : public ShapedObject
     bool canHaveNonEmptyElements();
 #endif
 
+    void setEmptyElements() {
+        elements_ = emptyObjectElements;
+    }
+
     void setFixedElements(uint32_t numShifted = 0) {
         MOZ_ASSERT(canHaveNonEmptyElements());
         elements_ = fixedElements() + numShifted;
@@ -1378,8 +1401,7 @@ class NativeObject : public ShapedObject
     }
 
     void setPrivateGCThing(gc::Cell* cell) {
-        MOZ_ASSERT_IF(IsMarkedBlack(this),
-                      !JS::GCThingIsMarkedGray(JS::GCCellPtr(cell, cell->getTraceKind())));
+        MOZ_ASSERT_IF(IsMarkedBlack(this), !cell->isMarkedGray());
         void** pprivate = &privateRef(numFixedSlots());
         privateWriteBarrierPre(pprivate);
         *pprivate = reinterpret_cast<void*>(cell);
@@ -1588,7 +1610,7 @@ AddPropertyTypesAfterProtoChange(JSContext* cx, NativeObject* obj, ObjectGroup* 
 } // namespace js
 
 
-/*** Inline functions declared in jsobj.h that use the native declarations above *****************/
+/*** Inline functions declared in JSObject.h that use the native declarations above **************/
 
 inline bool
 js::HasProperty(JSContext* cx, HandleObject obj, HandleId id, bool* foundp)

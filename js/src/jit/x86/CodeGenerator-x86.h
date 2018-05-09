@@ -25,11 +25,11 @@ class CodeGeneratorX86 : public CodeGeneratorX86Shared
 
   protected:
     ValueOperand ToValue(LInstruction* ins, size_t pos);
-    ValueOperand ToOutValue(LInstruction* ins);
     ValueOperand ToTempValue(LInstruction* ins, size_t pos);
 
     template <typename T> void emitWasmLoad(T* ins);
     template <typename T> void emitWasmStore(T* ins);
+    template <typename T> void emitWasmStoreOrExchangeAtomicI64(T* ins, uint32_t offset);
 
   public:
     CodeGeneratorX86(MIRGenerator* gen, LIRGraph* graph, MacroAssembler* masm);
@@ -47,18 +47,22 @@ class CodeGeneratorX86 : public CodeGeneratorX86Shared
     void visitWasmUint32ToFloat32(LWasmUint32ToFloat32* lir);
     void visitTruncateDToInt32(LTruncateDToInt32* ins);
     void visitTruncateFToInt32(LTruncateFToInt32* ins);
-    void visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins);
-    void visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins);
     void visitWasmLoad(LWasmLoad* ins);
     void visitWasmLoadI64(LWasmLoadI64* ins);
     void visitWasmStore(LWasmStore* ins);
     void visitWasmStoreI64(LWasmStoreI64* ins);
     void visitAsmJSLoadHeap(LAsmJSLoadHeap* ins);
     void visitAsmJSStoreHeap(LAsmJSStoreHeap* ins);
-    void visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins);
-    void visitAsmJSAtomicExchangeHeap(LAsmJSAtomicExchangeHeap* ins);
-    void visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins);
-    void visitAsmJSAtomicBinopHeapForEffect(LAsmJSAtomicBinopHeapForEffect* ins);
+    void visitWasmCompareExchangeHeap(LWasmCompareExchangeHeap* ins);
+    void visitWasmAtomicExchangeHeap(LWasmAtomicExchangeHeap* ins);
+    void visitWasmAtomicBinopHeap(LWasmAtomicBinopHeap* ins);
+    void visitWasmAtomicBinopHeapForEffect(LWasmAtomicBinopHeapForEffect* ins);
+
+    void visitWasmAtomicLoadI64(LWasmAtomicLoadI64* ins);
+    void visitWasmAtomicStoreI64(LWasmAtomicStoreI64* ins);
+    void visitWasmCompareExchangeI64(LWasmCompareExchangeI64* ins);
+    void visitWasmAtomicExchangeI64(LWasmAtomicExchangeI64* ins);
+    void visitWasmAtomicBinopI64(LWasmAtomicBinopI64* ins);
 
     void visitOutOfLineTruncate(OutOfLineTruncate* ool);
     void visitOutOfLineTruncateFloat32(OutOfLineTruncateFloat32* ool);
@@ -79,9 +83,6 @@ class CodeGeneratorX86 : public CodeGeneratorX86Shared
     void visitWasmTruncateToInt64(LWasmTruncateToInt64* lir);
     void visitInt64ToFloatingPoint(LInt64ToFloatingPoint* lir);
     void visitTestI64AndBranch(LTestI64AndBranch* lir);
-
-  private:
-    void asmJSAtomicComputeAddress(Register addrTemp, Register ptrReg, Register memoryBase);
 };
 
 typedef CodeGeneratorX86 CodeGeneratorSpecific;

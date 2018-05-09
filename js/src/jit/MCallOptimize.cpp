@@ -7,13 +7,16 @@
 #include "mozilla/Casting.h"
 
 #include "jsmath.h"
-#include "jsobj.h"
-#include "jsstr.h"
 
 #include "builtin/AtomicsObject.h"
-#include "builtin/Intl.h"
+#include "builtin/intl/Collator.h"
+#include "builtin/intl/DateTimeFormat.h"
+#include "builtin/intl/NumberFormat.h"
+#include "builtin/intl/PluralRules.h"
+#include "builtin/intl/RelativeTimeFormat.h"
 #include "builtin/MapObject.h"
 #include "builtin/SIMD.h"
+#include "builtin/String.h"
 #include "builtin/TestingFunctions.h"
 #include "builtin/TypedObject.h"
 #include "jit/BaselineInspector.h"
@@ -23,13 +26,13 @@
 #include "jit/MIR.h"
 #include "jit/MIRGraph.h"
 #include "vm/ArgumentsObject.h"
+#include "vm/JSObject.h"
 #include "vm/ProxyObject.h"
 #include "vm/SelfHosting.h"
 #include "vm/TypedArrayObject.h"
 
-#include "jsscriptinlines.h"
-
 #include "jit/shared/Lowering-shared-inl.h"
+#include "vm/JSScript-inl.h"
 #include "vm/NativeObject-inl.h"
 #include "vm/StringObject-inl.h"
 #include "vm/UnboxedObject-inl.h"
@@ -39,8 +42,6 @@ using mozilla::AssertedCast;
 
 using JS::DoubleNaNValue;
 using JS::TrackedOutcome;
-using JS::TrackedStrategy;
-using JS::TrackedTypeSite;
 
 namespace js {
 namespace jit {
@@ -55,7 +56,7 @@ IonBuilder::inlineNativeCall(CallInfo& callInfo, JSFunction* target)
         return InliningStatus_NotInlined;
     }
 
-    if (!target->jitInfo() || target->jitInfo()->type() != JSJitInfo::InlinableNative) {
+    if (!target->hasJitInfo() || target->jitInfo()->type() != JSJitInfo::InlinableNative) {
         // Reaching here means we tried to inline a native for which there is no
         // Ion specialization.
         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeNoSpecialization);
@@ -248,6 +249,8 @@ IonBuilder::inlineNativeCall(CallInfo& callInfo, JSFunction* target)
         return inlineObject(callInfo);
       case InlinableNative::ObjectCreate:
         return inlineObjectCreate(callInfo);
+      case InlinableNative::ObjectIs:
+        return inlineObjectIs(callInfo);
       case InlinableNative::ObjectToString:
         return inlineObjectToString(callInfo);
 
@@ -977,7 +980,7 @@ IonBuilder::inlineArraySlice(CallInfo& callInfo)
         current->add(end->toInstruction());
     }
 
-    MArraySlice* ins = MArraySlice::New(alloc(), constraints(),
+    MArraySlice* ins = MArraySlice::New(alloc(),
                                         obj, begin, end,
                                         templateObj,
                                         templateObj->group()->initialHeap(constraints()));
@@ -1862,7 +1865,7 @@ IonBuilder::inlineStrCharCodeAt(CallInfo& callInfo)
 
     callInfo.setImplicitlyUsedUnchecked();
 
-    MInstruction* index = MToInt32::New(alloc(), callInfo.getArg(0));
+    MInstruction* index = MToNumberInt32::New(alloc(), callInfo.getArg(0));
     current->add(index);
 
     MStringLength* length = MStringLength::New(alloc(), callInfo.thisArg());
@@ -1972,7 +1975,7 @@ IonBuilder::inlineStrCharAt(CallInfo& callInfo)
 
     callInfo.setImplicitlyUsedUnchecked();
 
-    MInstruction* index = MToInt32::New(alloc(), callInfo.getArg(0));
+    MInstruction* index = MToNumberInt32::New(alloc(), callInfo.getArg(0));
     current->add(index);
 
     MStringLength* length = MStringLength::New(alloc(), callInfo.thisArg());
@@ -2378,6 +2381,68 @@ IonBuilder::inlineObjectCreate(CallInfo& callInfo)
 }
 
 IonBuilder::InliningResult
+IonBuilder::inlineObjectIs(CallInfo& callInfo)
+{
+    if (callInfo.argc() < 2 || callInfo.constructing())
+        return InliningStatus_NotInlined;
+
+    if (getInlineReturnType() != MIRType::Boolean)
+        return InliningStatus_NotInlined;
+
+    MDefinition* left = callInfo.getArg(0);
+    MDefinition* right = callInfo.getArg(1);
+    MIRType leftType = left->type();
+    MIRType rightType = right->type();
+
+    bool strictEq;
+    bool incompatibleTypes = false;
+    if (leftType == rightType) {
+        // We can only compare the arguments with strict-equals semantics if
+        // they aren't floating-point types or values. Otherwise we need to
+        // use MSameValue.
+        strictEq = !(IsFloatingPointType(leftType) || leftType == MIRType::Value);
+    } else if (leftType == MIRType::Value) {
+        // Also use strict-equals when comparing a value with a non-number.
+        strictEq = !IsNumberType(rightType);
+    } else if (rightType == MIRType::Value) {
+        // Dual case to the previous one, only with reversed operands.
+        strictEq = !IsNumberType(leftType);
+    } else if (IsNumberType(leftType) && IsNumberType(rightType)) {
+        // Both arguments are numbers, but with different representations. We
+        // can't use strict-equals semantics to compare the operands, but
+        // instead need to use MSameValue.
+        strictEq = false;
+    } else {
+        incompatibleTypes = true;
+    }
+
+    if (incompatibleTypes) {
+        // The result is always |false| when comparing incompatible types.
+        pushConstant(BooleanValue(false));
+    } else {
+        bool emitted = false;
+        if (strictEq) {
+            // Specialize |Object.is(lhs, rhs)| as |lhs === rhs|.
+            MOZ_TRY(compareTrySpecialized(&emitted, JSOP_STRICTEQ, left, right, false));
+        }
+
+        if (!emitted) {
+            MSameValue* ins = MSameValue::New(alloc(), left, right);
+
+            // The more specific operand is expected to be in the rhs.
+            if (IsNumberType(leftType) && rightType == MIRType::Value)
+                ins->swapOperands();
+
+            current->add(ins);
+            current->push(ins);
+        }
+    }
+
+    callInfo.setImplicitlyUsedUnchecked();
+    return InliningStatus_Inlined;
+}
+
+IonBuilder::InliningResult
 IonBuilder::inlineObjectToString(CallInfo& callInfo)
 {
     if (callInfo.constructing() || callInfo.argc() != 0) {
@@ -2490,20 +2555,10 @@ IonBuilder::inlineGetNextEntryForIterator(CallInfo& callInfo, MGetNextEntryForIt
     MDefinition* iterArg = callInfo.getArg(0);
     MDefinition* resultArg = callInfo.getArg(1);
 
+    // Self-hosted code has already validated |iterArg| is a (possibly boxed)
+    // Map- or SetIterator object.
     if (iterArg->type() != MIRType::Object)
         return InliningStatus_NotInlined;
-
-    TemporaryTypeSet* iterTypes = iterArg->resultTypeSet();
-    const Class* iterClasp = iterTypes ? iterTypes->getKnownClass(constraints()) : nullptr;
-    if (mode == MGetNextEntryForIterator::Map) {
-        if (iterClasp != &MapIteratorObject::class_)
-            return InliningStatus_NotInlined;
-    } else {
-        MOZ_ASSERT(mode == MGetNextEntryForIterator::Set);
-
-        if (iterClasp != &SetIteratorObject::class_)
-            return InliningStatus_NotInlined;
-    }
 
     if (resultArg->type() != MIRType::Object)
         return InliningStatus_NotInlined;
@@ -3142,7 +3197,7 @@ IonBuilder::inlineToInteger(CallInfo& callInfo)
 
     callInfo.setImplicitlyUsedUnchecked();
 
-    MToInt32* toInt32 = MToInt32::New(alloc(), callInfo.getArg(0));
+    auto* toInt32 = MToNumberInt32::New(alloc(), callInfo.getArg(0));
     current->add(toInt32);
     current->push(toInt32);
     return InliningStatus_Inlined;
@@ -3508,7 +3563,7 @@ IonBuilder::atomicsMeetsPreconditions(CallInfo& callInfo, Scalar::Type* arrayTyp
     if (!arg0Types)
         return false;
 
-    TemporaryTypeSet::TypedArraySharedness sharedness;
+    TemporaryTypeSet::TypedArraySharedness sharedness = TemporaryTypeSet::UnknownSharedness;
     *arrayType = arg0Types->getTypedArrayType(constraints(), &sharedness);
     *requiresTagCheck = sharedness != TemporaryTypeSet::KnownShared;
     switch (*arrayType) {
@@ -3607,9 +3662,7 @@ IonBuilder::inlineSimd(CallInfo& callInfo, JSFunction* target, SimdType type)
     }
 
     JSNative native = target->native();
-    const JSJitInfo* jitInfo = target->jitInfo();
-    MOZ_ASSERT(jitInfo && jitInfo->type() == JSJitInfo::InlinableNative);
-    SimdOperation simdOp = SimdOperation(jitInfo->nativeOp);
+    SimdOperation simdOp = SimdOperation(target->jitInfo()->nativeOp);
 
     switch(simdOp) {
       case SimdOperation::Constructor:
@@ -4252,8 +4305,9 @@ SimdTypeToArrayElementType(SimdType type)
 }
 
 bool
-IonBuilder::prepareForSimdLoadStore(CallInfo& callInfo, Scalar::Type simdType, MInstruction** elements,
-                                    MDefinition** index, Scalar::Type* arrayType)
+IonBuilder::prepareForSimdLoadStore(CallInfo& callInfo, Scalar::Type simdType,
+                                    MInstruction** elements, MDefinition** index,
+                                    Scalar::Type* arrayType)
 {
     MDefinition* array = callInfo.getArg(0);
     *index = callInfo.getArg(1);
@@ -4261,37 +4315,39 @@ IonBuilder::prepareForSimdLoadStore(CallInfo& callInfo, Scalar::Type simdType, M
     if (!ElementAccessIsTypedArray(constraints(), array, *index, arrayType))
         return false;
 
-    MInstruction* indexAsInt32 = MToInt32::New(alloc(), *index);
+    MInstruction* indexAsInt32 = MToNumberInt32::New(alloc(), *index);
     current->add(indexAsInt32);
     *index = indexAsInt32;
 
-    MDefinition* indexForBoundsCheck = *index;
+    MDefinition* indexLoadEnd = *index;
 
-    // Artificially make sure the index is in bounds by adding the difference
-    // number of slots needed (e.g. reading from Float32Array we need to make
-    // sure to be in bounds for 4 slots, so add 3, etc.).
     MOZ_ASSERT(Scalar::byteSize(simdType) % Scalar::byteSize(*arrayType) == 0);
-    int32_t suppSlotsNeeded = Scalar::byteSize(simdType) / Scalar::byteSize(*arrayType) - 1;
-    if (suppSlotsNeeded) {
-        MConstant* suppSlots = constant(Int32Value(suppSlotsNeeded));
-        MAdd* addedIndex = MAdd::New(alloc(), *index, suppSlots);
-        // We're fine even with the add overflows, as long as the generated code
-        // for the bounds check uses an unsigned comparison.
+    int32_t byteLoadSize = Scalar::byteSize(simdType) / Scalar::byteSize(*arrayType);
+    if (byteLoadSize > 1) {
+        // Add the number of supplementary needed slots. Overflows are fine
+        // because the bounds check code uses an unsigned comparison.
+        MAdd* addedIndex = MAdd::New(alloc(), *index, constant(Int32Value(byteLoadSize - 1)));
         addedIndex->setInt32Specialization();
         current->add(addedIndex);
-        indexForBoundsCheck = addedIndex;
+        indexLoadEnd = addedIndex;
     }
 
     MInstruction* length;
     addTypedArrayLengthAndData(array, SkipBoundsCheck, index, &length, elements);
 
-    // It can be that the index is out of bounds, while the added index for the
-    // bounds check is in bounds, so we actually need two bounds checks here.
-    MInstruction* positiveCheck = MBoundsCheck::New(alloc(), *index, length);
-    current->add(positiveCheck);
+    // If the index+size addition overflows, then indexLoadEnd might be
+    // in bounds while the actual index isn't, so we need two bounds checks
+    // here.
+    if (byteLoadSize > 1) {
+        indexLoadEnd = addBoundsCheck(indexLoadEnd, length);
+        auto* sub = MSub::New(alloc(), indexLoadEnd, constant(Int32Value(byteLoadSize - 1)));
+        sub->setInt32Specialization();
+        current->add(sub);
+        *index = sub;
+    }
 
-    MInstruction* fullCheck = MBoundsCheck::New(alloc(), indexForBoundsCheck, length);
-    current->add(fullCheck);
+    *index = addBoundsCheck(*index, length);
+
     return true;
 }
 

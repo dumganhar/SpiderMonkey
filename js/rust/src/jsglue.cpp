@@ -16,9 +16,9 @@
 #include "jsfriendapi.h"
 #include "js/Proxy.h"
 #include "js/Class.h"
-#include "jswrapper.h"
 #include "js/MemoryMetrics.h"
 #include "js/Principals.h"
+#include "js/Wrapper.h"
 #include "assert.h"
 
 struct ProxyTraps {
@@ -533,7 +533,6 @@ NewCompileOptions(JSContext* aCx, const char* aFile, unsigned aLine)
 {
     JS::OwningCompileOptions *opts = new JS::OwningCompileOptions(aCx);
     opts->setFileAndLine(aCx, aFile, aLine);
-    opts->setVersion(JSVERSION_DEFAULT);
     return opts;
 }
 

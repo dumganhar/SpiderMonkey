@@ -20,9 +20,10 @@
 
 #include "mozilla/CheckedInt.h"
 
-#include "jsprf.h"
-
 #include "jit/JitOptions.h"
+#include "js/Printf.h"
+#include "vm/JSCompartment.h"
+#include "vm/JSContext.h"
 #include "wasm/WasmBinaryIterator.h"
 
 using namespace js;
@@ -263,6 +264,9 @@ Decoder::finishNameSubsection(uint32_t endOffset)
 bool
 wasm::EncodeLocalEntries(Encoder& e, const ValTypeVector& locals)
 {
+    if (locals.length() > MaxLocals)
+        return false;
+
     uint32_t numLocalEntries = 0;
     ValType prev = ValType(TypeCode::Limit);
     for (ValType t : locals) {
@@ -605,7 +609,7 @@ DecodeFunctionBodyExprs(const ModuleEnvironment& env, const Sig& sig, const ValT
             CHECK(iter.readConversion(ValType::I64, ValType::F64, &nothing));
           case uint16_t(Op::F64PromoteF32):
             CHECK(iter.readConversion(ValType::F32, ValType::F64, &nothing));
-#ifdef ENABLE_WASM_THREAD_OPS
+#ifdef ENABLE_WASM_SIGNEXTEND_OPS
           case uint16_t(Op::I32Extend8S):
           case uint16_t(Op::I32Extend16S):
             CHECK(iter.readConversion(ValType::I32, ValType::I32, &nothing));
@@ -715,6 +719,201 @@ DecodeFunctionBodyExprs(const ModuleEnvironment& env, const Sig& sig, const ValT
             CHECK(iter.readReturn(&nothing));
           case uint16_t(Op::Unreachable):
             CHECK(iter.readUnreachable());
+          case uint16_t(Op::NumericPrefix): {
+#ifdef ENABLE_WASM_SATURATING_TRUNC_OPS
+            switch (op.b1) {
+              case uint16_t(NumericOp::I32TruncSSatF32):
+              case uint16_t(NumericOp::I32TruncUSatF32):
+                CHECK(iter.readConversion(ValType::F32, ValType::I32, &nothing));
+              case uint16_t(NumericOp::I32TruncSSatF64):
+              case uint16_t(NumericOp::I32TruncUSatF64):
+                CHECK(iter.readConversion(ValType::F64, ValType::I32, &nothing));
+              case uint16_t(NumericOp::I64TruncSSatF32):
+              case uint16_t(NumericOp::I64TruncUSatF32):
+                CHECK(iter.readConversion(ValType::F32, ValType::I64, &nothing));
+              case uint16_t(NumericOp::I64TruncSSatF64):
+              case uint16_t(NumericOp::I64TruncUSatF64):
+                CHECK(iter.readConversion(ValType::F64, ValType::I64, &nothing));
+              default:
+                return iter.unrecognizedOpcode(&op);
+            }
+            break;
+#else
+            return iter.unrecognizedOpcode(&op);
+#endif
+          }
+          case uint16_t(Op::ThreadPrefix): {
+#ifdef ENABLE_WASM_THREAD_OPS
+            switch (op.b1) {
+              case uint16_t(ThreadOp::Wake): {
+                LinearMemoryAddress<Nothing> addr;
+                CHECK(iter.readWake(&addr, &nothing));
+              }
+              case uint16_t(ThreadOp::I32Wait): {
+                LinearMemoryAddress<Nothing> addr;
+                CHECK(iter.readWait(&addr, ValType::I32, 4, &nothing, &nothing));
+              }
+              case uint16_t(ThreadOp::I64Wait): {
+                LinearMemoryAddress<Nothing> addr;
+                CHECK(iter.readWait(&addr, ValType::I64, 8, &nothing, &nothing));
+              }
+              case uint16_t(ThreadOp::I32AtomicLoad): {
+                LinearMemoryAddress<Nothing> addr;
+                CHECK(iter.readAtomicLoad(&addr, ValType::I32, 4));
+              }
+              case uint16_t(ThreadOp::I64AtomicLoad): {
+                LinearMemoryAddress<Nothing> addr;
+                CHECK(iter.readAtomicLoad(&addr, ValType::I64, 8));
+              }
+              case uint16_t(ThreadOp::I32AtomicLoad8U): {
+                LinearMemoryAddress<Nothing> addr;
+                CHECK(iter.readAtomicLoad(&addr, ValType::I32, 1));
+              }
+              case uint16_t(ThreadOp::I32AtomicLoad16U): {
+                LinearMemoryAddress<Nothing> addr;
+                CHECK(iter.readAtomicLoad(&addr, ValType::I32, 2));
+              }
+              case uint16_t(ThreadOp::I64AtomicLoad8U): {
+                LinearMemoryAddress<Nothing> addr;
+                CHECK(iter.readAtomicLoad(&addr, ValType::I64, 1));
+              }
+              case uint16_t(ThreadOp::I64AtomicLoad16U): {
+                LinearMemoryAddress<Nothing> addr;
+                CHECK(iter.readAtomicLoad(&addr, ValType::I64, 2));
+              }
+              case uint16_t(ThreadOp::I64AtomicLoad32U): {
+                LinearMemoryAddress<Nothing> addr;
+                CHECK(iter.readAtomicLoad(&addr, ValType::I64, 4));
+              }
+              case uint16_t(ThreadOp::I32AtomicStore): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicStore(&addr, ValType::I32, 4, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicStore): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicStore(&addr, ValType::I64, 8, &nothing));
+              }
+              case uint16_t(ThreadOp::I32AtomicStore8U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicStore(&addr, ValType::I32, 1, &nothing));
+              }
+              case uint16_t(ThreadOp::I32AtomicStore16U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicStore(&addr, ValType::I32, 2, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicStore8U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicStore(&addr, ValType::I64, 1, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicStore16U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicStore(&addr, ValType::I64, 2, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicStore32U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicStore(&addr, ValType::I64, 4, &nothing));
+              }
+              case uint16_t(ThreadOp::I32AtomicAdd):
+              case uint16_t(ThreadOp::I32AtomicSub):
+              case uint16_t(ThreadOp::I32AtomicAnd):
+              case uint16_t(ThreadOp::I32AtomicOr):
+              case uint16_t(ThreadOp::I32AtomicXor):
+              case uint16_t(ThreadOp::I32AtomicXchg): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicRMW(&addr, ValType::I32, 4, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicAdd):
+              case uint16_t(ThreadOp::I64AtomicSub):
+              case uint16_t(ThreadOp::I64AtomicAnd):
+              case uint16_t(ThreadOp::I64AtomicOr):
+              case uint16_t(ThreadOp::I64AtomicXor):
+              case uint16_t(ThreadOp::I64AtomicXchg): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicRMW(&addr, ValType::I64, 8, &nothing));
+              }
+              case uint16_t(ThreadOp::I32AtomicAdd8U):
+              case uint16_t(ThreadOp::I32AtomicSub8U):
+              case uint16_t(ThreadOp::I32AtomicAnd8U):
+              case uint16_t(ThreadOp::I32AtomicOr8U):
+              case uint16_t(ThreadOp::I32AtomicXor8U):
+              case uint16_t(ThreadOp::I32AtomicXchg8U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicRMW(&addr, ValType::I32, 1, &nothing));
+              }
+              case uint16_t(ThreadOp::I32AtomicAdd16U):
+              case uint16_t(ThreadOp::I32AtomicSub16U):
+              case uint16_t(ThreadOp::I32AtomicAnd16U):
+              case uint16_t(ThreadOp::I32AtomicOr16U):
+              case uint16_t(ThreadOp::I32AtomicXor16U):
+              case uint16_t(ThreadOp::I32AtomicXchg16U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicRMW(&addr, ValType::I32, 2, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicAdd8U):
+              case uint16_t(ThreadOp::I64AtomicSub8U):
+              case uint16_t(ThreadOp::I64AtomicAnd8U):
+              case uint16_t(ThreadOp::I64AtomicOr8U):
+              case uint16_t(ThreadOp::I64AtomicXor8U):
+              case uint16_t(ThreadOp::I64AtomicXchg8U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicRMW(&addr, ValType::I64, 1, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicAdd16U):
+              case uint16_t(ThreadOp::I64AtomicSub16U):
+              case uint16_t(ThreadOp::I64AtomicAnd16U):
+              case uint16_t(ThreadOp::I64AtomicOr16U):
+              case uint16_t(ThreadOp::I64AtomicXor16U):
+              case uint16_t(ThreadOp::I64AtomicXchg16U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicRMW(&addr, ValType::I64, 2, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicAdd32U):
+              case uint16_t(ThreadOp::I64AtomicSub32U):
+              case uint16_t(ThreadOp::I64AtomicAnd32U):
+              case uint16_t(ThreadOp::I64AtomicOr32U):
+              case uint16_t(ThreadOp::I64AtomicXor32U):
+              case uint16_t(ThreadOp::I64AtomicXchg32U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicRMW(&addr, ValType::I64, 4, &nothing));
+              }
+              case uint16_t(ThreadOp::I32AtomicCmpXchg): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicCmpXchg(&addr, ValType::I32, 4, &nothing, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicCmpXchg): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicCmpXchg(&addr, ValType::I64, 8, &nothing, &nothing));
+              }
+              case uint16_t(ThreadOp::I32AtomicCmpXchg8U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicCmpXchg(&addr, ValType::I32, 1, &nothing, &nothing));
+              }
+              case uint16_t(ThreadOp::I32AtomicCmpXchg16U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicCmpXchg(&addr, ValType::I32, 2, &nothing, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicCmpXchg8U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicCmpXchg(&addr, ValType::I64, 1, &nothing, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicCmpXchg16U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicCmpXchg(&addr, ValType::I64, 2, &nothing, &nothing));
+              }
+              case uint16_t(ThreadOp::I64AtomicCmpXchg32U): {
+                  LinearMemoryAddress<Nothing> addr;
+                  CHECK(iter.readAtomicCmpXchg(&addr, ValType::I64, 4, &nothing, &nothing));
+              }
+              default:
+                return iter.unrecognizedOpcode(&op);
+            }
+            break;
+#else
+            return iter.unrecognizedOpcode(&op);
+#endif  // ENABLE_WASM_THREAD_OPS
+          }
+          case uint16_t(Op::MozPrefix):
+            return iter.unrecognizedOpcode(&op);
           default:
             return iter.unrecognizedOpcode(&op);
         }
@@ -869,19 +1068,23 @@ DecodeSignatureIndex(Decoder& d, const SigWithIdVector& sigs, uint32_t* sigIndex
 }
 
 static bool
-DecodeLimits(Decoder& d, Limits* limits)
+DecodeLimits(Decoder& d, Limits* limits, Shareable allowShared = Shareable::False)
 {
     uint8_t flags;
     if (!d.readFixedU8(&flags))
         return d.fail("expected flags");
 
-    if (flags & ~uint8_t(0x1))
-        return d.failf("unexpected bits set in flags: %" PRIu32, (flags & ~uint8_t(0x1)));
+    uint8_t mask = allowShared == Shareable::True
+                   ? uint8_t(MemoryMasks::AllowShared)
+                   : uint8_t(MemoryMasks::AllowUnshared);
+
+    if (flags & ~uint8_t(mask))
+        return d.failf("unexpected bits set in flags: %" PRIu32, (flags & ~uint8_t(mask)));
 
     if (!d.readVarU32(&limits->initial))
         return d.fail("expected initial length");
 
-    if (flags & 0x1) {
+    if (flags & uint8_t(MemoryTableFlags::HasMaximum)) {
         uint32_t maximum;
         if (!d.readVarU32(&maximum))
             return d.fail("expected maximum length");
@@ -894,6 +1097,19 @@ DecodeLimits(Decoder& d, Limits* limits)
 
         limits->maximum.emplace(maximum);
     }
+
+    limits->shared = Shareable::False;
+
+#ifdef ENABLE_WASM_THREAD_OPS
+    if (allowShared == Shareable::True) {
+        if ((flags & uint8_t(MemoryTableFlags::IsShared)) && !(flags & uint8_t(MemoryTableFlags::HasMaximum)))
+            return d.fail("maximum length required for shared memory");
+
+        limits->shared = (flags & uint8_t(MemoryTableFlags::IsShared))
+                       ? Shareable::True
+                       : Shareable::False;
+    }
+#endif
 
     return true;
 }
@@ -928,10 +1144,7 @@ GlobalIsJSCompatible(Decoder& d, ValType type, bool isMutable)
       case ValType::I32:
       case ValType::F32:
       case ValType::F64:
-        break;
       case ValType::I64:
-        if (!jit::JitOptions.wasmTestMode)
-            return d.fail("can't import/export an Int64 global to JS");
         break;
       default:
         return d.fail("unexpected variable type in global import/export");
@@ -967,7 +1180,7 @@ DecodeMemoryLimits(Decoder& d, ModuleEnvironment* env)
         return d.fail("already have default memory");
 
     Limits memory;
-    if (!DecodeLimits(d, &memory))
+    if (!DecodeLimits(d, &memory, Shareable::True))
         return false;
 
     if (memory.initial > MaxMemoryInitialPages)
@@ -990,7 +1203,12 @@ DecodeMemoryLimits(Decoder& d, ModuleEnvironment* env)
         memory.maximum = Some(maximumBytes.isValid() ? maximumBytes.value() : UINT32_MAX);
     }
 
-    env->memoryUsage = MemoryUsage::Unshared;
+    if (memory.shared == Shareable::True && env->sharedMemoryEnabled == Shareable::False)
+        return d.fail("shared memory is disabled");
+
+    env->memoryUsage = memory.shared == Shareable::True
+                     ? MemoryUsage::Shared
+                     : MemoryUsage::Unshared;
     env->minMemoryLength = memory.initial;
     env->maxMemoryLength = memory.maximum;
     return true;
@@ -1529,6 +1747,9 @@ wasm::DecodeModuleEnvironment(Decoder& d, ModuleEnvironment* env)
     if (!d.startSection(SectionId::Code, env, &env->codeSection, "code"))
         return false;
 
+    if (env->codeSection && env->codeSection->size > MaxCodeSectionBytes)
+        return d.fail("code section too big");
+
     return true;
 }
 
@@ -1625,7 +1846,7 @@ DecodeDataSection(Decoder& d, ModuleEnvironment* env)
 }
 
 static bool
-DecodeModuleNameSubsection(Decoder& d, ModuleEnvironment* env)
+DecodeModuleNameSubsection(Decoder& d)
 {
     Maybe<uint32_t> endOffset;
     if (!d.startNameSubsection(NameType::Module, &endOffset))
@@ -1712,7 +1933,7 @@ DecodeNameSection(Decoder& d, ModuleEnvironment* env)
 
     // Once started, custom sections do not report validation errors.
 
-    if (!DecodeModuleNameSubsection(d, env))
+    if (!DecodeModuleNameSubsection(d))
         goto finish;
 
     if (!DecodeFunctionNameSubsection(d, env))
@@ -1752,11 +1973,14 @@ wasm::DecodeModuleTail(Decoder& d, ModuleEnvironment* env)
 // Validate algorithm.
 
 bool
-wasm::Validate(const ShareableBytes& bytecode, UniqueChars* error)
+wasm::Validate(JSContext* cx, const ShareableBytes& bytecode, UniqueChars* error)
 {
     Decoder d(bytecode.bytes, 0, error);
 
-    ModuleEnvironment env;
+    ModuleEnvironment env(CompileMode::Once, Tier::Ion, DebugEnabled::False,
+                          cx->compartment()->creationOptions().getSharedMemoryAndAtomicsEnabled()
+                          ? Shareable::True
+                          : Shareable::False);
     if (!DecodeModuleEnvironment(d, &env))
         return false;
 

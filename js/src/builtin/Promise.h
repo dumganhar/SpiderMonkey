@@ -138,6 +138,9 @@ MOZ_MUST_USE PromiseObject*
 CreatePromiseObjectForAsync(JSContext* cx, HandleValue generatorVal);
 
 MOZ_MUST_USE bool
+IsPromiseForAsync(JSObject* promise);
+
+MOZ_MUST_USE bool
 AsyncFunctionReturned(JSContext* cx, Handle<PromiseObject*> resultPromise, HandleValue value);
 
 MOZ_MUST_USE bool
@@ -192,7 +195,7 @@ class OffThreadPromiseTask : public JS::Dispatchable
     virtual bool resolve(JSContext* cx, Handle<PromiseObject*> promise) = 0;
 
     // JS::Dispatchable implementation. Ends with 'delete this'.
-    void run(JSContext* cx, MaybeShuttingDown maybeShuttingDown) override final;
+    void run(JSContext* cx, MaybeShuttingDown maybeShuttingDown) final;
 
   public:
     ~OffThreadPromiseTask() override;

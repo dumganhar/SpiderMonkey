@@ -13,14 +13,11 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#include "jscntxt.h"
 #include "jsutil.h"
 
 #include "ds/LifoAlloc.h"
-
-#ifdef XP_WIN32
-#include "jswin.h"
-#endif
+#include "util/Windows.h"
+#include "vm/JSContext.h"
 
 using mozilla::PodCopy;
 
@@ -36,7 +33,7 @@ public:
     {
     }
 
-    bool append(const char* sp, size_t len) {
+    bool append(const char* sp, size_t len) override {
         return printer.put(sp, len);
     }
 

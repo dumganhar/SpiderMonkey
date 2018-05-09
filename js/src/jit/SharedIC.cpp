@@ -7,7 +7,6 @@
 #include "jit/SharedIC.h"
 
 #include "mozilla/Casting.h"
-#include "mozilla/DebugOnly.h"
 #include "mozilla/IntegerPrintfMacros.h"
 #include "mozilla/Sprintf.h"
 
@@ -26,12 +25,13 @@
 #endif
 #include "jit/VMFunctions.h"
 #include "vm/Interpreter.h"
+#include "vm/StringType.h"
 
 #include "jit/MacroAssembler-inl.h"
+#include "jit/SharedICHelpers-inl.h"
 #include "vm/Interpreter-inl.h"
 
 using mozilla::BitwiseCast;
-using mozilla::DebugOnly;
 
 namespace js {
 namespace jit {
@@ -291,17 +291,6 @@ ICStub::trace(JSTracer* trc)
         TraceEdge(trc, &updateStub->group(), "baseline-update-group");
         break;
       }
-      case ICStub::GetIntrinsic_Constant: {
-        ICGetIntrinsic_Constant* constantStub = toGetIntrinsic_Constant();
-        TraceEdge(trc, &constantStub->value(), "baseline-getintrinsic-constant-value");
-        break;
-      }
-      case ICStub::InstanceOf_Function: {
-        ICInstanceOf_Function* instanceofStub = toInstanceOf_Function();
-        TraceEdge(trc, &instanceofStub->shape(), "baseline-instanceof-fun-shape");
-        TraceEdge(trc, &instanceofStub->prototypeObject(), "baseline-instanceof-fun-prototype");
-        break;
-      }
       case ICStub::NewArray_Fallback: {
         ICNewArray_Fallback* stub = toNewArray_Fallback();
         TraceNullableEdge(trc, &stub->templateObject(), "baseline-newarray-template");
@@ -529,7 +518,7 @@ ICStubCompiler::getStubCode()
         return nullptr;
     Linker linker(masm);
     AutoFlushICache afc("getStubCode");
-    Rooted<JitCode*> newStubCode(cx, linker.newCode<CanGC>(cx, BASELINE_CODE));
+    Rooted<JitCode*> newStubCode(cx, linker.newCode(cx, CodeKind::Baseline));
     if (!newStubCode)
         return nullptr;
 
@@ -554,10 +543,7 @@ ICStubCompiler::getStubCode()
 bool
 ICStubCompiler::tailCallVM(const VMFunction& fun, MacroAssembler& masm)
 {
-    JitCode* code = cx->runtime()->jitRuntime()->getVMWrapper(fun);
-    if (!code)
-        return false;
-
+    TrampolinePtr code = cx->runtime()->jitRuntime()->getVMWrapper(fun);
     MOZ_ASSERT(fun.expectTailCall == TailCall);
     uint32_t argSize = fun.explicitStackSlots() * sizeof(void*);
     if (engine_ == Engine::Baseline) {
@@ -574,10 +560,7 @@ ICStubCompiler::callVM(const VMFunction& fun, MacroAssembler& masm)
 {
     MOZ_ASSERT(inStubFrame_);
 
-    JitCode* code = cx->runtime()->jitRuntime()->getVMWrapper(fun);
-    if (!code)
-        return false;
-
+    TrampolinePtr code = cx->runtime()->jitRuntime()->getVMWrapper(fun);
     MOZ_ASSERT(fun.expectTailCall == NonTailCall);
     MOZ_ASSERT(engine_ == Engine::Baseline);
 
@@ -603,7 +586,7 @@ ICStubCompiler::enterStubFrame(MacroAssembler& masm, Register scratch)
 }
 
 void
-ICStubCompiler::assumeStubFrame(MacroAssembler& masm)
+ICStubCompiler::assumeStubFrame()
 {
     MOZ_ASSERT(!inStubFrame_);
     inStubFrame_ = true;
@@ -1259,7 +1242,6 @@ DoUnaryArithFallback(JSContext* cx, void* payload, ICUnaryArith_Fallback* stub_,
 {
     SharedStubInfo info(cx, payload, stub_->icEntry());
     ICStubCompiler::Engine engine = info.engine();
-    HandleScript script = info.innerScript();
 
     // This fallback stub may trigger debug mode toggling.
     DebugModeOSRVolatileStub<ICUnaryArith_Fallback*> stub(engine, info.maybeFrame(), stub_);
@@ -1277,7 +1259,7 @@ DoUnaryArithFallback(JSContext* cx, void* payload, ICUnaryArith_Fallback* stub_,
         break;
       }
       case JSOP_NEG:
-        if (!NegOperation(cx, script, pc, val, res))
+        if (!NegOperation(cx, val, res))
             return false;
         break;
       default:
@@ -2167,7 +2149,7 @@ ICGetProp_Fallback::Compiler::generateStubCode(MacroAssembler& masm)
     // This is the resume point used when bailout rewrites call stack to undo
     // Ion inlined frames. The return address pushed onto reconstructed stack
     // will point here.
-    assumeStubFrame(masm);
+    assumeStubFrame();
     bailoutReturnOffset_.bind(masm.currentOffset());
 
     leaveStubFrame(masm, true);
@@ -2557,12 +2539,13 @@ ICTypeMonitor_ObjectGroup::Compiler::generateStubCode(MacroAssembler& masm)
     masm.branchTestObject(Assembler::NotEqual, R0, &failure);
     MaybeWorkAroundAmdBug(masm);
 
-    // Guard on the object's ObjectGroup.
+    // Guard on the object's ObjectGroup. No Spectre mitigations are needed
+    // here: we're just recording type information for Ion compilation and
+    // it's safe to speculatively return.
     Register obj = masm.extractObject(R0, ExtractTemp0);
-    masm.loadPtr(Address(obj, JSObject::offsetOfGroup()), R1.scratchReg());
-
     Address expectedGroup(ICStubReg, ICTypeMonitor_ObjectGroup::offsetOfGroup());
-    masm.branchPtr(Assembler::NotEqual, expectedGroup, R1.scratchReg(), &failure);
+    masm.branchTestObjGroupNoSpectreMitigations(Assembler::NotEqual, obj, expectedGroup,
+                                                R1.scratchReg(), &failure);
     MaybeWorkAroundAmdBug(masm);
 
     EmitReturnFromIC(masm);
@@ -2784,9 +2767,7 @@ GenerateNewObjectWithTemplateCode(JSContext* cx, JSObject* templateObject)
     Label failure;
     Register objReg = R0.scratchReg();
     Register tempReg = R1.scratchReg();
-    masm.movePtr(ImmGCPtr(templateObject->group()), tempReg);
-    masm.branchTest32(Assembler::NonZero, Address(tempReg, ObjectGroup::offsetOfFlags()),
-                      Imm32(OBJECT_FLAG_PRE_TENURE), &failure);
+    masm.branchIfPretenuredGroup(templateObject->group(), tempReg, &failure);
     masm.branchPtr(Assembler::NotEqual, AbsoluteAddress(cx->compartment()->addressOfMetadataBuilder()),
                    ImmWord(0), &failure);
     masm.createGCObject(objReg, tempReg, templateObject, gc::DefaultHeap, &failure);
@@ -2798,7 +2779,7 @@ GenerateNewObjectWithTemplateCode(JSContext* cx, JSObject* templateObject)
 
     Linker linker(masm);
     AutoFlushICache afc("GenerateNewObjectWithTemplateCode");
-    return linker.newCode<CanGC>(cx, BASELINE_CODE);
+    return linker.newCode(cx, CodeKind::Baseline);
 }
 
 static bool

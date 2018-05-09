@@ -105,6 +105,7 @@
     _(SetArgumentsObjectArg)        \
     _(ReturnFromCtor)               \
     _(ComputeThis)                  \
+    _(ImplicitThis)                 \
     _(BitNotI)                      \
     _(BitNotV)                      \
     _(BitOpI)                       \
@@ -146,6 +147,9 @@
     _(IsNullOrLikeUndefinedT)       \
     _(IsNullOrLikeUndefinedAndBranchV)\
     _(IsNullOrLikeUndefinedAndBranchT)\
+    _(SameValueD)                   \
+    _(SameValueV)                   \
+    _(SameValueVM)                  \
     _(MinMaxI)                      \
     _(MinMaxD)                      \
     _(MinMaxF)                      \
@@ -261,21 +265,22 @@
     _(GuardReceiverPolymorphic)     \
     _(GuardObjectGroup)             \
     _(GuardObjectIdentity)          \
-    _(GuardClass)                   \
     _(GuardUnboxedExpando)          \
     _(LoadUnboxedExpando)           \
     _(TypeBarrierV)                 \
     _(TypeBarrierO)                 \
-    _(MonitorTypes)                 \
     _(PostWriteBarrierO)            \
+    _(PostWriteBarrierS)            \
     _(PostWriteBarrierV)            \
     _(PostWriteElementBarrierO)     \
+    _(PostWriteElementBarrierS)     \
     _(PostWriteElementBarrierV)     \
     _(InitializedLength)            \
     _(SetInitializedLength)         \
     _(BoundsCheck)                  \
     _(BoundsCheckRange)             \
     _(BoundsCheckLower)             \
+    _(SpectreMaskIndex)             \
     _(LoadElementV)                 \
     _(LoadElementT)                 \
     _(LoadElementHole)              \
@@ -300,9 +305,7 @@
     _(FallibleStoreElementV)        \
     _(FallibleStoreElementT)        \
     _(LoadTypedArrayElementHole)    \
-    _(LoadTypedArrayElementStatic)  \
     _(StoreTypedArrayElementHole)   \
-    _(StoreTypedArrayElementStatic) \
     _(AtomicIsLockFree)             \
     _(GuardSharedTypedArray)        \
     _(CompareExchangeTypedArrayElement) \
@@ -381,7 +384,7 @@
     _(HasOwnCache)                  \
     _(InstanceOfO)                  \
     _(InstanceOfV)                  \
-    _(CallInstanceOf)               \
+    _(InstanceOfCache)              \
     _(InterruptCheck)               \
     _(Rotate)                       \
     _(RotateI64)                    \
@@ -424,10 +427,10 @@
     _(GetPrototypeOf)               \
     _(AsmJSLoadHeap)                \
     _(AsmJSStoreHeap)               \
-    _(AsmJSCompareExchangeHeap)     \
-    _(AsmJSAtomicExchangeHeap)      \
-    _(AsmJSAtomicBinopHeap)         \
-    _(AsmJSAtomicBinopHeapForEffect)\
+    _(WasmCompareExchangeHeap)      \
+    _(WasmAtomicExchangeHeap)       \
+    _(WasmAtomicBinopHeap)          \
+    _(WasmAtomicBinopHeapForEffect) \
     _(WasmTruncateToInt32)          \
     _(WasmTrap)                     \
     _(WasmReinterpret)              \
@@ -436,6 +439,7 @@
     _(WasmSelect)                   \
     _(WasmSelectI64)                \
     _(WasmBoundsCheck)              \
+    _(WasmAlignmentCheck)           \
     _(WasmLoadTls)                  \
     _(WasmAddOffset)                \
     _(WasmLoad)                     \
@@ -454,6 +458,7 @@
     _(WasmStackArg)                 \
     _(WasmStackArgI64)              \
     _(WasmCall)                     \
+    _(WasmCallVoid)                 \
     _(WasmCallI64)                  \
     _(WasmUint32ToDouble)           \
     _(WasmUint32ToFloat32)

@@ -40,8 +40,8 @@
                     '#' + __LINE__ + ': ' + msg) \
     } while (false)
 #else
-#define assert(b, info) do {} while (false) // Elided assertion.
-#define dbg(msg) do {} while (false) // Elided debugging output.
+#define assert(b, info) ; // Elided assertion.
+#define dbg(msg) ; // Elided debugging output.
 #endif
 
 // All C++-implemented standard builtins library functions used in self-hosted
@@ -75,12 +75,6 @@ MakeConstructible(Record, {});
 
 
 /********** Abstract operations defined in ECMAScript Language Specification **********/
-
-
-/* Spec: ECMAScript Language Specification, 5.1 edition, 8.12.6 and 11.8.7 */
-function HasProperty(o, p) {
-    return p in o;
-}
 
 
 /* Spec: ECMAScript Language Specification, 5.1 edition, 9.2 and 11.4.9 */
@@ -155,22 +149,6 @@ function GetMethod(V, P) {
 function IsPropertyKey(argument) {
     var type = typeof argument;
     return type === "string" || type === "symbol";
-}
-
-/* Spec: ECMAScript Draft, 6th edition Dec 24, 2014, 7.4.1 */
-function GetIterator(obj, method) {
-    // Steps 1-2.
-    assert(IsCallable(method), "method argument is not optional");
-
-    // Steps 3-4.
-    var iterator = callContentFunction(method, obj);
-
-    // Step 5.
-    if (!IsObject(iterator))
-        ThrowTypeError(JSMSG_GET_ITER_RETURNED_PRIMITIVE);
-
-    // Step 6.
-    return iterator;
 }
 
 #define TO_PROPERTY_KEY(name) \
@@ -258,7 +236,7 @@ function CopyDataProperties(target, source, excluded) {
     source = ToObject(source);
 
     // Step 4.b.
-    var keys = OwnPropertyKeys(source, JSITER_OWNONLY | JSITER_HIDDEN | JSITER_SYMBOLS);
+    var keys = OwnPropertyKeys(source);
 
     // Step 5.
     for (var index = 0; index < keys.length; index++) {
@@ -289,7 +267,7 @@ function CopyDataPropertiesUnfiltered(target, source) {
     source = ToObject(source);
 
     // Step 4.b.
-    var keys = OwnPropertyKeys(source, JSITER_OWNONLY | JSITER_HIDDEN | JSITER_SYMBOLS);
+    var keys = OwnPropertyKeys(source);
 
     // Step 5.
     for (var index = 0; index < keys.length; index++) {
@@ -308,5 +286,5 @@ function CopyDataPropertiesUnfiltered(target, source) {
 function outer() {
     return function inner() {
         return "foo";
-    }
+    };
 }

@@ -1,3 +1,5 @@
+enableExpressionClosures();
+eval(`
 m = {
     i() {},
     n() {},
@@ -39,3 +41,4 @@ function ()[{
 t = function () {};
 getLcovInfo();
 relazifyFunctions();
+`);
