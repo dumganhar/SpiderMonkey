@@ -495,7 +495,7 @@ def check_compiler(compiler, language, target):
     cxx14_version = 201402
     if info.language == 'C++':
         if info.type == 'clang' and info.language_version != cxx14_version:
-            append_flag('-std=gnu++14')
+            append_flag('-std=c++14')
         # MSVC 2015 headers include C++14 features, but don't guard them
         # with appropriate checks.
         elif info.type == 'clang-cl' and info.language_version != cxx14_version:
@@ -505,7 +505,7 @@ def check_compiler(compiler, language, target):
         elif info.type == 'gcc' and \
                 info.language_version not in (draft_cxx14_version,
                                               cxx14_version):
-            append_flag('-std=gnu++14')
+            append_flag('-std=c++14')
 
     # We force clang-cl to emulate Visual C++ 2017 version 15.4
     if info.type == 'clang-cl' and info.version != '19.11.25547':

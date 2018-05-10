@@ -7,7 +7,7 @@
 # Build mozglue as a shared lib on Windows, OSX and Android. But not for
 # embedders!
 # If this is ever changed, update MOZ_SHARED_MOZGLUE in browser/installer/Makefile.in
-if CONFIG['JS_STANDALONE'] and not CONFIG['MOZ_MEMORY']:
+if CONFIG['JS_STANDALONE']: # and not CONFIG['MOZ_MEMORY']:
     Library('mozglue')
 elif CONFIG['OS_TARGET'] in ('WINNT', 'Darwin', 'Android'):
     SharedLibrary('mozglue')
