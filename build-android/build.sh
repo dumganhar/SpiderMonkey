@@ -28,7 +28,6 @@ python ../configure.py \
             --with-android-ndk=$NDK_ROOT \
             --with-android-sdk=$HOME/bin/android-sdk \
             --with-android-version=${ANDROID_VERSION} \
-            --with-android-platform=
             --with-arch=${CPU_ARCH} \
             --target=${TARGET_NAME} \
             --disable-shared-js \
